@@ -5,3 +5,5 @@ openai>=1.0.0
 streamlit
 python-dotenv
 pinecone
+requests
+yt-dlp

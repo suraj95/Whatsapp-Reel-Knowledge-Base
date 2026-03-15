@@ -1,18 +1,13 @@
 import os
 import uuid
 
-from fastapi import FastAPI
+from fastapi import FastAPI, HTTPException
 from dotenv import load_dotenv
 
 from openai import OpenAI
 from pinecone import Pinecone
 
-from .helpers import (
-    auto_tag_text,
-    embed_text,
-    fake_transcript_from_reel,
-    summarize_text,
-)
+from .helpers import auto_tag_text, embed_text, summarize_video_with_gpt4o
 from .models import (
     AddReelRequest,
     AddReelResponse,
@@ -52,25 +47,34 @@ app = FastAPI(title="WhatsApp Reel Knowledge Base")
 
 @app.post("/reels", response_model=AddReelResponse)
 def add_reel(payload: AddReelRequest):
-    # 1. Get transcript (or use Whisper if you have audio file)
-    transcript = fake_transcript_from_reel(payload.url)
-
-    # 2. Summarize with LLM
-    summary = summarize_text(client, transcript)
+    # 1. Summarize the reel with GPT-4o (vision-capable) using downloaded frames
+    try:
+        summary = summarize_video_with_gpt4o(client, payload.url)
+    except Exception as e:
+        # Most likely: private / blocked / unsupported URL or yt-dlp/ffmpeg error
+        message = str(e)
+        if not message:
+            message = repr(e)
+        # Truncate overly long errors
+        if len(message) > 500:
+            message = message[:500] + "..."
+        raise HTTPException(
+            status_code=400,
+            detail=f"Could not process this video link. Reason: {message}",
+        )
 
     # 3. Auto tag
-    auto_tags = auto_tag_text(client, summary + "\n\n" + transcript)
+    auto_tags = auto_tag_text(client, summary)
     if payload.manual_tags:
         auto_tags = list(
             dict.fromkeys(auto_tags + [t.lower() for t in payload.manual_tags])
         )
 
-    # 4. Build embedding using transcript + summary + tags
+    # 4. Build embedding using summary + tags
     doc_text = (
         f"URL: {payload.url}\n"
         f"SUMMARY: {summary}\n"
         f"TAGS: {', '.join(auto_tags)}\n"
-        f"TRANSCRIPT: {transcript}"
     )
     embedding = embed_text(client, doc_text)
 

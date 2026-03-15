@@ -4,7 +4,7 @@ Simple prototype to save WhatsApp / Instagram reels as a searchable knowledge ba
 
 - FastAPI backend
 - OpenAI (chat + embeddings)
-- Chroma vector database
+- Pinecone vector database
 - Streamlit UI
 
 ## Setup
