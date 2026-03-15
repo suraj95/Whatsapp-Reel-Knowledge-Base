@@ -1,72 +1,173 @@
-# WhatsApp Reel Knowledge Base
+## WhatsApp Reel Knowledge Base 🎥🧠
 
-Simple prototype to save WhatsApp / Instagram reels as a searchable knowledge base using:
+A small AI project that turns **Instagram / WhatsApp reels into a searchable knowledge base**.
 
-- FastAPI backend
-- OpenAI (chat + embeddings)
-- Pinecone vector database
-- Streamlit UI
+## The Problem 🤔
 
-## Setup
+My wife and I constantly share reels for:
 
-1. Create a virtual environment and install dependencies:
+- 🌍 travel destinations  
+- 🍜 restaurants  
+- 🏝 hidden beaches  
+- 🍣 food spots  
+
+They get buried across multiple WhatsApp groups, and after a while we forget things like:
+
+> “What was that Goa restaurant reel?”  
+> “Didn't we save a Bali beach video?”
+
+Scrolling through chat history becomes impossible.
+
+---
+
+## The Idea 💡
+
+Turn reels into a **personal AI memory**.
+
+Paste a reel URL and the system will:
+
+1. Download the reel  
+2. Extract frames from the video  
+3. Analyze the frames with an AI vision model  
+4. Generate a summary + tags  
+5. Store embeddings in a vector database  
+
+Later you can **search it using natural language**.
+
+Example queries:
+
+- show restaurants we saved in Goa  
+- any reels about Bali beaches?  
+- cheap street food ideas  
+
+---
+
+## Demo 🚀
+
+### Copy a Reel URL
+
+![Reel Copy Placeholder](./docs/images/reel.png)
+
+### Paste the Reel URL and get AI Generated Summary
+
+![Summary Placeholder](./docs/images/reel_summary_placeholder.png)
+
+### Search the Knowledge Base
+
+![Search Placeholder](./docs/images/reel_search_placeholder.png)
+
+---
+
+## Tech Stack ⚙️
+
+**Backend**
+- FastAPI
+
+**AI**
+- OpenAI (vision summarization + embeddings)
+
+**Vector Database**
+- Pinecone
+
+**Frontend**
+- Streamlit
+
+**Video Processing**
+- yt-dlp (reel download)  
+- ffmpeg (frame extraction)
+
+---
+
+## Architecture 🏗
+
+Reel URL  
+↓  
+Download reel (yt-dlp)  
+↓  
+Extract frames (ffmpeg)  
+↓  
+Vision model summary  
+↓  
+Embeddings  
+↓  
+Pinecone vector database  
+↓  
+Natural language search  
+
+---
+
+## Setup 🛠
+
+Create a virtual environment:
 
 ```bash
 cd "Whatsapp Reel Knowledge Base"
+
 python -m venv .venv
-source .venv/bin/activate  # on Windows: .venv\Scripts\activate
+source .venv/bin/activate   # Windows: .venv\Scripts\activate
 pip install -r requirements.txt
 ```
 
-2. Set your OpenAI API key in a `.env` file:
+Create `.env` file:
 
 ```bash
-echo "OPENAI_API_KEY=sk-..." > .env
+OPENAI_API_KEY=sk-...
+PINECONE_API_KEY=...
 ```
 
-> Make sure the `.env` file is NOT committed to source control.
+⚠️ Make sure `.env` is not committed to source control.
 
-## Run the backend (FastAPI)
+---
+
+## Run Backend
 
 ```bash
 uvicorn backend.main:app --reload --port 8000
 ```
 
-The API docs will be available at `http://localhost:8000/docs`.
+API docs:
 
-## Run the UI (Streamlit)
+`http://localhost:8000/docs`
 
-In another terminal (with the same virtualenv activated):
+---
+
+## Run UI
 
 ```bash
 streamlit run ui/app.py
 ```
 
-Open the printed URL (usually `http://localhost:8501`) in your browser.
+Open in browser:
 
-## Usage
+`http://localhost:8501`
 
-- **Save new reel**:
-  - Paste a reel URL.
-  - Optionally add manual tags like `goa, restaurant, street food`.
-  - The backend:
-    - (Stub) generates a fake transcript.
-    - Summarizes it using the LLM.
-    - Generates auto-tags.
-    - Stores everything in Chroma with an embedding.
+---
 
-- **Ask questions**:
-  - Example queries:
-    - `show restaurants we saved in Goa`
-    - `any reels about Bali?`
-    - `cheap street food ideas?`
-  - The system embeds your query, searches similar reels, and shows the best matches.
+## Usage 🧭
 
-## Next steps / ideas
+### Save a Reel
 
-- Replace the `fake_transcript_from_reel` stub with real:
-  - Reel downloader → audio file.
-  - Whisper (local or via OpenAI) to get the true transcript.
-- Add user accounts and share collections between you and your wife.
-- Move metadata to Postgres and keep embeddings in Chroma / Pinecone.
+Paste a reel URL and optionally add tags like:
+
+- goa  
+- restaurant  
+- street food  
+
+The backend will:
+
+- download the reel  
+- extract frames  
+- generate an AI summary  
+- create embeddings  
+- store everything in Pinecone  
+
+### Ask Questions
+
+Example queries:
+
+- show restaurants we saved in Goa  
+- any reels about Bali?  
+- cheap street food ideas  
+
+The system embeds the query, searches Pinecone, and returns the most relevant reels.
 
