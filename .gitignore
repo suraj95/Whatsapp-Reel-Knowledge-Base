@@ -12,3 +12,6 @@ __pycache__
 *.pywz
 *.pyzz
 *.pywzz
+
+.DS_Store
+backend/.DS_Store
