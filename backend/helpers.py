@@ -6,11 +6,86 @@ import re
 import subprocess
 import tempfile
 from functools import lru_cache
-from typing import Dict, List, Tuple
+from typing import Dict, List, Optional, Tuple
 
 from openai import OpenAI
 import requests
 from yt_dlp import YoutubeDL
+
+
+def _locationiq_geocode(query: str) -> Dict:
+    maps_key = os.getenv("LOCATIONIQ_API_KEY")
+    if not maps_key or not query:
+        return {}
+    try:
+        resp = requests.get(
+            "https://us1.locationiq.com/v1/search.php",
+            params={
+                "key": maps_key,
+                "q": query,
+                "format": "json",
+                "limit": 1,
+                "addressdetails": 1,
+            },
+            timeout=8,
+        )
+        resp.raise_for_status()
+        results = resp.json()
+        if isinstance(results, list) and results:
+            top = results[0]
+            address = top.get("address", {})
+            city = (
+                address.get("city")
+                or address.get("town")
+                or address.get("village")
+                or address.get("state_district")
+            )
+            return {
+                "lat": top.get("lat"),
+                "lng": top.get("lon"),
+                "city": city,
+                "country": address.get("country"),
+            }
+    except Exception:
+        return {}
+    return {}
+
+
+def _approximate_coordinates(
+    place_name: Optional[str], city: Optional[str], country: Optional[str]
+) -> Tuple[Optional[float], Optional[float], Optional[str], Optional[str]]:
+    """
+    Best-effort geocoding fallback for enrichment outputs missing lat/lng.
+    """
+    candidates = []
+    if place_name and city and country:
+        candidates.append(f"{place_name}, {city}, {country}")
+    if place_name and city:
+        candidates.append(f"{place_name}, {city}")
+    if place_name and country:
+        candidates.append(f"{place_name}, {country}")
+    if place_name:
+        candidates.append(place_name)
+    if city and country:
+        candidates.append(f"{city}, {country}")
+    if city:
+        candidates.append(city)
+
+    def _as_float(value):
+        if value is None or value == "":
+            return None
+        try:
+            return float(value)
+        except Exception:
+            return None
+
+    for query in candidates:
+        geo = _locationiq_geocode(query)
+        lat = _as_float(geo.get("lat"))
+        lng = _as_float(geo.get("lng"))
+        if lat is not None and lng is not None:
+            return lat, lng, geo.get("city"), geo.get("country")
+    return None, None, None, None
 
 
 def _extract_frames(video_path: str, frames_dir: str) -> List[str]:
@@ -291,12 +366,34 @@ def _normalize_enrichment(payload: Dict, vision_summary: str) -> Dict:
         except Exception:
             return None
 
+    place_name = payload.get("place_name")
+    city = payload.get("city")
+    country = payload.get("country")
+    lat = _as_float(payload.get("lat"))
+    lng = _as_float(payload.get("lng"))
+
+    # If model output has location context but no coordinates, geocode best-effort.
+    if lat is None or lng is None:
+        approx_lat, approx_lng, approx_city, approx_country = _approximate_coordinates(
+            place_name=place_name,
+            city=city,
+            country=country,
+        )
+        if lat is None:
+            lat = approx_lat
+        if lng is None:
+            lng = approx_lng
+        if not city and approx_city:
+            city = approx_city
+        if not country and approx_country:
+            country = approx_country
+
     return {
-        "place_name": payload.get("place_name"),
-        "city": payload.get("city"),
-        "country": payload.get("country"),
-        "lat": _as_float(payload.get("lat")),
-        "lng": _as_float(payload.get("lng")),
+        "place_name": place_name,
+        "city": city,
+        "country": country,
+        "lat": lat,
+        "lng": lng,
         "rating": _as_float(payload.get("rating")),
         "category": category,
         "cuisine": payload.get("cuisine"),

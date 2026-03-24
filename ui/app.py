@@ -43,6 +43,7 @@ def render_enrichment(enrichment: dict):
         st.markdown("**tags:** " + ", ".join(tags))
 
     if lat is not None and lng is not None:
+        st.caption("Approximate location")
         try:
             map_df = pd.DataFrame([{"lat": float(lat), "lon": float(lng)}])
             st.map(map_df, zoom=11)
