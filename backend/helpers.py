@@ -1,11 +1,14 @@
 import base64
 import glob
+import json
 import os
 import subprocess
 import tempfile
-from typing import List
+from functools import lru_cache
+from typing import Dict, List, Tuple
 
 from openai import OpenAI
+import requests
 from yt_dlp import YoutubeDL
 
 
@@ -157,4 +160,220 @@ def embed_text(client: OpenAI, text: str) -> List[float]:
         input=text,
     )
     return resp.data[0].embedding
+
+
+@lru_cache(maxsize=1)
+def _get_enrichment_executor():
+    try:
+        from langchain.agents import create_agent
+        from langchain_community.tools.tavily_search import TavilySearchResults
+        from langchain_core.tools import tool
+    except Exception as e:
+        raise RuntimeError(
+            "Missing enrichment dependencies. Install langchain and "
+            "langchain-community."
+        ) from e
+
+    @tool
+    def search_place_details(query: str) -> dict:
+        """Search for a place and return key details."""
+        maps_key = os.getenv("LOCATIONIQ_API_KEY")
+        if not maps_key:
+            return {"error": "LOCATIONIQ_API_KEY is not set"}
+        try:
+            resp = requests.get(
+                "https://us1.locationiq.com/v1/search.php",
+                params={
+                    "key": maps_key,
+                    "q": query,
+                    "format": "json",
+                    "limit": 1,
+                    "addressdetails": 1,
+                },
+                timeout=10,
+            )
+            resp.raise_for_status()
+            results = resp.json()
+            if isinstance(results, list) and results:
+                top = results[0]
+                address = top.get("address", {})
+                city = (
+                    address.get("city")
+                    or address.get("town")
+                    or address.get("village")
+                    or address.get("state_district")
+                )
+                return {
+                    "name": top.get("display_name", "").split(",")[0].strip() or query,
+                    "formatted_address": top.get("display_name"),
+                    "rating": None,  # LocationIQ geocoding does not return ratings.
+                    "geometry": {
+                        "location": {
+                            "lat": top.get("lat"),
+                            "lng": top.get("lon"),
+                        }
+                    },
+                    "city": city,
+                    "country": address.get("country"),
+                }
+            return {"error": "Place not found"}
+        except Exception as ex:
+            return {"error": f"Place lookup failed: {ex}"}
+
+    tools = [
+        TavilySearchResults(max_results=2),
+        search_place_details,
+    ]
+
+    system_prompt = """You are an enrichment agent for a travel/food reel database.
+Given a raw vision summary of an Instagram reel, extract structured metadata.
+
+If the summary mentions a specific place or restaurant:
+1) Use search_place_details to get coordinates and rating
+2) Use TavilySearchResults if the place name is unclear
+
+Return ONLY valid JSON in this exact schema:
+{
+  "place_name": string|null,
+  "city": string|null,
+  "country": string|null,
+  "lat": number|null,
+  "lng": number|null,
+  "rating": number|null,
+  "category": "restaurant"|"beach"|"hotel"|"activity"|"street_food"|"cafe"|"bar",
+  "cuisine": string|null,
+  "price_range": "budget"|"mid"|"luxury",
+  "summary": string,
+  "tags": string[]
+}
+
+Rules:
+- tags should contain 5-8 concise, lowercase tags.
+- summary should be a cleaned up version of the input.
+- if unknown, use null for optional fields."""
+
+    return create_agent(
+        model="openai:gpt-4o",
+        tools=tools,
+        system_prompt=system_prompt,
+    )
+
+
+def _normalize_enrichment(payload: Dict, vision_summary: str) -> Dict:
+    category = payload.get("category") or "activity"
+    if category not in {
+        "restaurant",
+        "beach",
+        "hotel",
+        "activity",
+        "street_food",
+        "cafe",
+        "bar",
+    }:
+        category = "activity"
+
+    price_range = payload.get("price_range") or "mid"
+    if price_range not in {"budget", "mid", "luxury"}:
+        price_range = "mid"
+
+    tags = payload.get("tags") or []
+    if not isinstance(tags, list):
+        tags = []
+    tags = [str(t).strip().lower() for t in tags if str(t).strip()]
+    tags = list(dict.fromkeys(tags))[:8]
+
+    def _as_float(value):
+        if value is None or value == "":
+            return None
+        try:
+            return float(value)
+        except Exception:
+            return None
+
+    return {
+        "place_name": payload.get("place_name"),
+        "city": payload.get("city"),
+        "country": payload.get("country"),
+        "lat": _as_float(payload.get("lat")),
+        "lng": _as_float(payload.get("lng")),
+        "rating": _as_float(payload.get("rating")),
+        "category": category,
+        "cuisine": payload.get("cuisine"),
+        "price_range": price_range,
+        "summary": (payload.get("summary") or vision_summary).strip(),
+        "tags": tags,
+    }
+
+
+def _parse_enrichment_output(raw_output: str, vision_summary: str) -> Dict:
+    try:
+        parsed = json.loads(raw_output)
+    except json.JSONDecodeError:
+        start = raw_output.find("{")
+        end = raw_output.rfind("}")
+        if start == -1 or end == -1 or end <= start:
+            parsed = {}
+        else:
+            try:
+                parsed = json.loads(raw_output[start : end + 1])
+            except json.JSONDecodeError:
+                parsed = {}
+    return _normalize_enrichment(parsed, vision_summary)
+
+
+async def enrich_reel_summary(vision_summary: str) -> Dict:
+    """
+    Enrich a raw visual summary into structured travel/food metadata.
+    """
+    executor = _get_enrichment_executor()
+    result = await executor.ainvoke(
+        {
+            "messages": [
+                {
+                    "role": "user",
+                    "content": f"Vision summary: {vision_summary}",
+                }
+            ]
+        }
+    )
+    raw_output = "{}"
+    messages = result.get("messages", [])
+    if messages:
+        last_message = messages[-1]
+        content = getattr(last_message, "content", "")
+        if isinstance(content, str):
+            raw_output = content
+        elif isinstance(content, list):
+            text_parts = []
+            for item in content:
+                if isinstance(item, dict):
+                    text = item.get("text")
+                    if text:
+                        text_parts.append(str(text))
+            if text_parts:
+                raw_output = "\n".join(text_parts)
+    return _parse_enrichment_output(raw_output, vision_summary)
+
+
+def format_enrichment_for_metadata(enrichment: Dict) -> Tuple[Dict, str]:
+    """
+    Keep metadata Pinecone-friendly and also preserve the full JSON payload.
+    """
+    metadata = {
+        "enrichment_place_name": enrichment.get("place_name"),
+        "enrichment_city": enrichment.get("city"),
+        "enrichment_country": enrichment.get("country"),
+        "enrichment_lat": enrichment.get("lat"),
+        "enrichment_lng": enrichment.get("lng"),
+        "enrichment_rating": enrichment.get("rating"),
+        "enrichment_category": enrichment.get("category"),
+        "enrichment_cuisine": enrichment.get("cuisine"),
+        "enrichment_price_range": enrichment.get("price_range"),
+        "enrichment_summary": enrichment.get("summary"),
+        "enrichment_tags": [str(t) for t in enrichment.get("tags", []) if str(t).strip()],
+    }
+    # Pinecone metadata does not accept null values, so omit None fields.
+    metadata = {k: v for k, v in metadata.items() if v is not None}
+    payload = json.dumps(enrichment)
+    return metadata, payload
 

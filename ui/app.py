@@ -7,7 +7,26 @@ st.set_page_config(page_title="WhatsApp Reel Knowledge Base", layout="centered")
 
 st.title("WhatsApp Reel Knowledge Base")
 
-tabs = st.tabs(["Save new reel", "Ask questions"])
+tabs = st.tabs(["Save new reel", "Ask questions", "Enrich summary"])
+
+
+def render_enrichment(enrichment: dict):
+    st.write("**Enrichment:**")
+    st.json(
+        {
+            "place_name": enrichment.get("place_name"),
+            "city": enrichment.get("city"),
+            "country": enrichment.get("country"),
+            "lat": enrichment.get("lat"),
+            "lng": enrichment.get("lng"),
+            "rating": enrichment.get("rating"),
+            "category": enrichment.get("category"),
+            "cuisine": enrichment.get("cuisine"),
+            "price_range": enrichment.get("price_range"),
+            "summary": enrichment.get("summary"),
+            "tags": enrichment.get("tags", []),
+        }
+    )
 
 # ---------- TAB 1: SAVE REEL ----------
 with tabs[0]:
@@ -35,6 +54,8 @@ with tabs[0]:
                 st.write("**Summary:**")
                 st.write(data["summary"])
                 st.write("**Tags:** " + ", ".join(data["auto_tags"]))
+                if data.get("enrichment"):
+                    render_enrichment(data["enrichment"])
                 st.caption(f"Reel ID: {data['reel_id']}")
             except Exception as e:
                 st.error(f"Error saving reel: {e}")
@@ -71,7 +92,34 @@ with tabs[1]:
                         st.markdown(f"**URL:** {r['url']}")
                         st.markdown(f"**Summary:** {r['summary']}")
                         st.markdown(f"**Tags:** {', '.join(r['auto_tags'])}")
+                        if r.get("enrichment"):
+                            render_enrichment(r["enrichment"])
                         st.caption(f"Reel ID: {r['reel_id']}")
             except Exception as e:
                 st.error(f"Error querying reels: {e}")
+
+# ---------- TAB 3: ENRICH RAW SUMMARY ----------
+with tabs[2]:
+    st.subheader("Run enrichment agent on raw summary")
+    vision_summary = st.text_area(
+        "Vision summary",
+        placeholder="Rooftop restaurant with sea view in Goa, grilled fish, sunset in background",
+        height=140,
+    )
+
+    if st.button("Enrich summary"):
+        if not vision_summary.strip():
+            st.error("Please add a vision summary.")
+        else:
+            try:
+                resp = requests.post(
+                    f"{API_BASE}/enrich",
+                    json={"vision_summary": vision_summary.strip()},
+                    timeout=90,
+                )
+                resp.raise_for_status()
+                data = resp.json()
+                render_enrichment(data["enrichment"])
+            except Exception as e:
+                st.error(f"Error enriching summary: {e}")
 

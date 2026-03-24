@@ -1,5 +1,6 @@
 import os
 import uuid
+from typing import List
 
 from fastapi import FastAPI, HTTPException
 from dotenv import load_dotenv
@@ -7,10 +8,19 @@ from dotenv import load_dotenv
 from openai import OpenAI
 from pinecone import Pinecone
 
-from .helpers import auto_tag_text, embed_text, summarize_video_with_gpt4o
+from .helpers import (
+    auto_tag_text,
+    embed_text,
+    enrich_reel_summary,
+    format_enrichment_for_metadata,
+    summarize_video_with_gpt4o,
+)
 from .models import (
     AddReelRequest,
     AddReelResponse,
+    EnrichRequest,
+    EnrichResponse,
+    EnrichmentData,
     QueryRequest,
     QueryResponse,
     ReelResult,
@@ -46,7 +56,7 @@ app = FastAPI(title="WhatsApp Reel Knowledge Base")
 
 
 @app.post("/reels", response_model=AddReelResponse)
-def add_reel(payload: AddReelRequest):
+async def add_reel(payload: AddReelRequest):
     # 1. Summarize the reel with GPT-4o (vision-capable) using downloaded frames
     try:
         summary = summarize_video_with_gpt4o(client, payload.url)
@@ -70,6 +80,10 @@ def add_reel(payload: AddReelRequest):
             dict.fromkeys(auto_tags + [t.lower() for t in payload.manual_tags])
         )
 
+    # 3b. Enrich summary using an agentic flow
+    enrichment = await enrich_reel_summary(summary)
+    enrichment_metadata, enrichment_json = format_enrichment_for_metadata(enrichment)
+
     # 4. Build embedding using summary + tags
     doc_text = (
         f"URL: {payload.url}\n"
@@ -91,6 +105,8 @@ def add_reel(payload: AddReelRequest):
                     "summary": summary,
                     "tags": auto_tags,
                     "doc_text": doc_text,
+                    **enrichment_metadata,
+                    "enrichment_json": enrichment_json,
                 },
             }
         ]
@@ -100,6 +116,7 @@ def add_reel(payload: AddReelRequest):
         reel_id=reel_id,
         summary=summary,
         auto_tags=auto_tags,
+        enrichment=EnrichmentData(**enrichment),
     )
 
 
@@ -128,6 +145,19 @@ def query_reels(payload: QueryRequest):
     for match in res.matches:
         meta = match.metadata or {}
         score = float(match.score) if match.score is not None else 0.0
+        enrichment = EnrichmentData(
+            place_name=meta.get("enrichment_place_name"),
+            city=meta.get("enrichment_city"),
+            country=meta.get("enrichment_country"),
+            lat=meta.get("enrichment_lat"),
+            lng=meta.get("enrichment_lng"),
+            rating=meta.get("enrichment_rating"),
+            category=meta.get("enrichment_category"),
+            cuisine=meta.get("enrichment_cuisine"),
+            price_range=meta.get("enrichment_price_range"),
+            summary=meta.get("enrichment_summary", meta.get("summary", "")),
+            tags=meta.get("enrichment_tags", []),
+        )
         results.append(
             ReelResult(
                 reel_id=match.id,
@@ -135,8 +165,15 @@ def query_reels(payload: QueryRequest):
                 summary=meta.get("summary", ""),
                 auto_tags=meta.get("tags", []),
                 score=score,
+                enrichment=enrichment,
             )
         )
 
     return QueryResponse(results=results)
+
+
+@app.post("/enrich", response_model=EnrichResponse)
+async def enrich_summary(payload: EnrichRequest):
+    enrichment = await enrich_reel_summary(payload.vision_summary)
+    return EnrichResponse(enrichment=EnrichmentData(**enrichment))
 
