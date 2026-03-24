@@ -2,6 +2,7 @@ import base64
 import glob
 import json
 import os
+import re
 import subprocess
 import tempfile
 from functools import lru_cache
@@ -306,18 +307,35 @@ def _normalize_enrichment(payload: Dict, vision_summary: str) -> Dict:
 
 
 def _parse_enrichment_output(raw_output: str, vision_summary: str) -> Dict:
+    cleaned = (raw_output or "").strip()
+    if cleaned.startswith("```"):
+        cleaned = re.sub(r"^```(?:json)?\s*", "", cleaned, flags=re.IGNORECASE)
+        cleaned = re.sub(r"\s*```$", "", cleaned)
+
     try:
-        parsed = json.loads(raw_output)
+        parsed = json.loads(cleaned)
     except json.JSONDecodeError:
-        start = raw_output.find("{")
-        end = raw_output.rfind("}")
+        # Fallback 1: parse first JSON object-like block from text.
+        start = cleaned.find("{")
+        end = cleaned.rfind("}")
         if start == -1 or end == -1 or end <= start:
-            parsed = {}
+            parsed = None
         else:
             try:
-                parsed = json.loads(raw_output[start : end + 1])
+                parsed = json.loads(cleaned[start : end + 1])
             except json.JSONDecodeError:
-                parsed = {}
+                parsed = None
+
+        # Fallback 2: if the model returned nested {"enrichment": {...}} or {"output": {...}}
+        if parsed is None:
+            parsed = {}
+        elif isinstance(parsed, dict):
+            if isinstance(parsed.get("enrichment"), dict):
+                parsed = parsed["enrichment"]
+            elif isinstance(parsed.get("output"), dict):
+                parsed = parsed["output"]
+        else:
+            parsed = {}
     return _normalize_enrichment(parsed, vision_summary)
 
 

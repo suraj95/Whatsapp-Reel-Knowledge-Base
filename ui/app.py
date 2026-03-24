@@ -1,5 +1,6 @@
 import requests
 import streamlit as st
+import pandas as pd
 
 API_BASE = "http://localhost:8000"
 
@@ -7,26 +8,46 @@ st.set_page_config(page_title="WhatsApp Reel Knowledge Base", layout="centered")
 
 st.title("WhatsApp Reel Knowledge Base")
 
-tabs = st.tabs(["Save new reel", "Ask questions", "Enrich summary"])
+tabs = st.tabs(["Save new reel", "Ask questions"])
 
 
 def render_enrichment(enrichment: dict):
-    st.write("**Enrichment:**")
-    st.json(
-        {
-            "place_name": enrichment.get("place_name"),
-            "city": enrichment.get("city"),
-            "country": enrichment.get("country"),
-            "lat": enrichment.get("lat"),
-            "lng": enrichment.get("lng"),
-            "rating": enrichment.get("rating"),
-            "category": enrichment.get("category"),
-            "cuisine": enrichment.get("cuisine"),
-            "price_range": enrichment.get("price_range"),
-            "summary": enrichment.get("summary"),
-            "tags": enrichment.get("tags", []),
-        }
-    )
+    place_name = enrichment.get("place_name") or "Unknown place"
+    city = enrichment.get("city")
+    country = enrichment.get("country")
+    lat = enrichment.get("lat")
+    lng = enrichment.get("lng")
+    rating = enrichment.get("rating")
+    category = enrichment.get("category")
+    cuisine = enrichment.get("cuisine")
+    price_range = enrichment.get("price_range")
+    summary = enrichment.get("summary")
+    tags = enrichment.get("tags", [])
+
+    location_parts = [part for part in [city, country] if part]
+    if location_parts:
+        st.markdown(f"**Place:** {place_name} ({', '.join(location_parts)})")
+    else:
+        st.markdown(f"**Place:** {place_name}")
+
+    info_cols = st.columns(3)
+    info_cols[0].markdown(f"**Category:** {category or 'n/a'}")
+    info_cols[1].markdown(f"**Price:** {price_range or 'n/a'}")
+    info_cols[2].markdown(f"**Rating:** {rating if rating is not None else 'n/a'}")
+
+    if cuisine:
+        st.markdown(f"**Cuisine:** {cuisine}")
+    if summary:
+        st.markdown(f"**Summary:** {summary}")
+    if tags:
+        st.markdown("**tags:** " + ", ".join(tags))
+
+    if lat is not None and lng is not None:
+        try:
+            map_df = pd.DataFrame([{"lat": float(lat), "lon": float(lng)}])
+            st.map(map_df, zoom=11)
+        except Exception:
+            st.caption(f"Map coordinates: {lat}, {lng}")
 
 # ---------- TAB 1: SAVE REEL ----------
 with tabs[0]:
@@ -43,17 +64,15 @@ with tabs[0]:
         else:
             tags_list = [t.strip() for t in manual_tags.split(",") if t.strip()] if manual_tags else []
             try:
-                resp = requests.post(
-                    f"{API_BASE}/reels",
-                    json={"url": url, "manual_tags": tags_list},
-                    timeout=60,
-                )
-                resp.raise_for_status()
-                data = resp.json()
+                with st.spinner("Analyzing reel, enriching details, and saving..."):
+                    resp = requests.post(
+                        f"{API_BASE}/reels",
+                        json={"url": url, "manual_tags": tags_list},
+                        timeout=120,
+                    )
+                    resp.raise_for_status()
+                    data = resp.json()
                 st.success("Reel saved successfully!")
-                st.write("**Summary:**")
-                st.write(data["summary"])
-                st.write("**Tags:** " + ", ".join(data["auto_tags"]))
                 if data.get("enrichment"):
                     render_enrichment(data["enrichment"])
                 st.caption(f"Reel ID: {data['reel_id']}")
@@ -74,13 +93,14 @@ with tabs[1]:
             st.error("Please enter a question.")
         else:
             try:
-                resp = requests.post(
-                    f"{API_BASE}/query",
-                    json={"query": query, "top_k": top_k},
-                    timeout=60,
-                )
-                resp.raise_for_status()
-                data = resp.json()
+                with st.spinner("Searching your reel knowledge base..."):
+                    resp = requests.post(
+                        f"{API_BASE}/query",
+                        json={"query": query, "top_k": top_k},
+                        timeout=60,
+                    )
+                    resp.raise_for_status()
+                    data = resp.json()
                 results = data.get("results", [])
 
                 if not results:
@@ -90,36 +110,9 @@ with tabs[1]:
                         st.markdown("---")
                         st.markdown(f"**Score:** `{r['score']:.3f}`")
                         st.markdown(f"**URL:** {r['url']}")
-                        st.markdown(f"**Summary:** {r['summary']}")
-                        st.markdown(f"**Tags:** {', '.join(r['auto_tags'])}")
                         if r.get("enrichment"):
                             render_enrichment(r["enrichment"])
                         st.caption(f"Reel ID: {r['reel_id']}")
             except Exception as e:
                 st.error(f"Error querying reels: {e}")
-
-# ---------- TAB 3: ENRICH RAW SUMMARY ----------
-with tabs[2]:
-    st.subheader("Run enrichment agent on raw summary")
-    vision_summary = st.text_area(
-        "Vision summary",
-        placeholder="Rooftop restaurant with sea view in Goa, grilled fish, sunset in background",
-        height=140,
-    )
-
-    if st.button("Enrich summary"):
-        if not vision_summary.strip():
-            st.error("Please add a vision summary.")
-        else:
-            try:
-                resp = requests.post(
-                    f"{API_BASE}/enrich",
-                    json={"vision_summary": vision_summary.strip()},
-                    timeout=90,
-                )
-                resp.raise_for_status()
-                data = resp.json()
-                render_enrichment(data["enrichment"])
-            except Exception as e:
-                st.error(f"Error enriching summary: {e}")
 
