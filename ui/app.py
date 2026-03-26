@@ -4,10 +4,16 @@ import pandas as pd
 import base64
 from pathlib import Path
 import re
+import time
 
 API_BASE = "http://localhost:8000"
+FAVICON_PATH = Path(__file__).resolve().parents[1] / "docs" / "images" / "flight_4283062.png"
 
-st.set_page_config(page_title="WhatsApp Reel Knowledge Base", layout="centered")
+st.set_page_config(
+    page_title="Travel Reels Knowledge Base",
+    page_icon=str(FAVICON_PATH),
+    layout="centered",
+)
 
 def _inject_travel_theme() -> None:
     # Use a local image asset as the background texture.
@@ -161,6 +167,14 @@ def _inject_travel_theme() -> None:
             background: rgba(255,255,255,0.88) !important;
           }
 
+          /* Chat bubbles */
+          div[data-testid="stChatMessage"] {
+            background: rgba(255,255,255,0.78) !important;
+            border: 1px solid rgba(30,58,95,0.12) !important;
+            border-radius: 14px !important;
+            box-shadow: 0 6px 18px rgba(15,23,42,0.05);
+          }
+
           /* Make map area clearly bounded */
           div[data-testid="stMap"],
           div[data-testid="stDeckGlJsonChart"],
@@ -235,30 +249,21 @@ def _inject_travel_theme() -> None:
     css = css.replace("{bg_img_css}", bg_img_css)
     st.markdown(css, unsafe_allow_html=True)
 
-    # Travel-friendly bot logo from open-source icons (embedded as data URIs).
-    bot_svg = """
-    <svg xmlns="http://www.w3.org/2000/svg" width="24" height="24" viewBox="0 0 24 24" fill="none"
-      stroke="#1e3a5f" stroke-width="2" stroke-linecap="round" stroke-linejoin="round">
-      <path d="M12 8V4H8" />
-      <rect width="16" height="12" x="4" y="8" rx="2" />
-      <path d="M2 14h2" />
-      <path d="M20 14h2" />
-      <path d="M15 13v2" />
-      <path d="M9 13v2" />
-    </svg>
-    """.strip()
-    compass_svg = """
-    <svg xmlns="http://www.w3.org/2000/svg" width="24" height="24" viewBox="0 0 24 24" fill="none"
-      stroke="#1e3a5f" stroke-width="2" stroke-linecap="round" stroke-linejoin="round">
-      <circle cx="12" cy="12" r="10" />
-      <path d="m16.24 7.76-1.804 5.411a2 2 0 0 1-1.265 1.265L7.76 16.24l1.804-5.411a2 2 0 0 1 1.265-1.265z" />
-    </svg>
-    """.strip()
-
-    bot_data_uri = "data:image/svg+xml;base64," + base64.b64encode(bot_svg.encode("utf-8")).decode("utf-8")
-    compass_data_uri = (
-        "data:image/svg+xml;base64,"
-        + base64.b64encode(compass_svg.encode("utf-8")).decode("utf-8")
+    # Homepage icon (from Flaticon link shared by user), embedded as data URI.
+    # Fall back to a simple emoji if the local asset is unavailable.
+    icon_path = repo_root / "docs" / "images" / "flight_4283062.png"
+    flight_icon_data_uri = ""
+    try:
+        flight_icon_data_uri = (
+            "data:image/png;base64,"
+            + base64.b64encode(icon_path.read_bytes()).decode("utf-8")
+        )
+    except Exception:
+        flight_icon_data_uri = ""
+    icon_html = (
+        f'<img class="robot-base" alt="Flight icon" src="{flight_icon_data_uri}" />'
+        if flight_icon_data_uri
+        else '<div style="font-size:34px; line-height:1;">✈️</div>'
     )
 
     st.markdown(
@@ -266,20 +271,11 @@ def _inject_travel_theme() -> None:
         <div class="travel-header">
           <div aria-hidden="true" style="display:flex; align-items:center;">
             <div class="travel-robot">
-              <img
-                class="robot-base"
-                alt=""
-                src="{bot_data_uri}"
-              />
-              <img
-                class="robot-badge"
-                alt=""
-                src="{compass_data_uri}"
-              />
+              {icon_html}
             </div>
           </div>
           <div>
-            <div class="travel-title">WhatsApp Reel Knowledge Base</div>
+            <div class="travel-title">Travel Reels Knowledge Base</div>
             <div class="travel-subtitle">Travel notes powered by AI summaries</div>
           </div>
         </div>
@@ -291,6 +287,18 @@ def _inject_travel_theme() -> None:
 _inject_travel_theme()
 
 tabs = st.tabs(["Save new reel", "Ask questions"])
+
+if "chat_messages" not in st.session_state:
+    st.session_state.chat_messages = [
+        {
+            "role": "assistant",
+            "content": (
+                "Hi! Ask me about your saved reels and I will find matches.\n\n"
+                "Try: `show restaurants we saved in Goa`"
+            ),
+            "results": None,
+        }
+    ]
 
 
 def render_enrichment(enrichment: dict):
@@ -347,21 +355,16 @@ def render_enrichment(enrichment: dict):
 with tabs[0]:
     st.subheader("Save a new reel")
     url = st.text_input("Paste reel link")
-    manual_tags = st.text_input(
-        "Optional manual tags (comma separated)",
-        placeholder="goa, restaurant, bali, street food",
-    )
 
     if st.button("Save reel", type="primary"):
         if not url:
             st.error("Please paste a reel URL.")
         else:
-            tags_list = [t.strip() for t in manual_tags.split(",") if t.strip()] if manual_tags else []
             try:
                 with st.spinner("Analyzing reel, enriching details, and saving..."):
                     resp = requests.post(
                         f"{API_BASE}/reels",
-                        json={"url": url, "manual_tags": tags_list},
+                        json={"url": url},
                         timeout=120,
                     )
                     resp.raise_for_status()
@@ -375,22 +378,38 @@ with tabs[0]:
 
 # ---------- TAB 2: ASK QUESTIONS ----------
 with tabs[1]:
-    st.subheader("Ask your saved reels")
-    query = st.text_input(
-        "Ask something...",
-        placeholder="show restaurants we saved in Goa",
-    )
-    top_k = st.slider("How many results?", 1, 10, 5)
+    st.subheader("Chat with your saved reels")
+    top_k = st.slider("Results to search per question", 1, 10, 5)
 
-    if st.button("Search reels"):
-        if not query:
-            st.error("Please enter a question.")
-        else:
+    for message in st.session_state.chat_messages:
+        with st.chat_message(message["role"]):
+            st.markdown(message["content"])
+            if message["role"] == "assistant" and message.get("results"):
+                with st.expander("Sources", expanded=False):
+                    for idx, r in enumerate(message["results"], start=1):
+                        st.markdown(f"**Result #{idx}** | score `{r['score']:.3f}`")
+                        st.markdown(f"URL: {r['url']}")
+                        if r.get("enrichment"):
+                            render_enrichment(r["enrichment"])
+                        st.caption(f"Reel ID: {r['reel_id']}")
+                        if idx < len(message["results"]):
+                            st.divider()
+
+    prompt = st.chat_input("Ask something about your reels...")
+    if prompt:
+        st.session_state.chat_messages.append(
+            {"role": "user", "content": prompt, "results": None}
+        )
+        with st.chat_message("user"):
+            st.markdown(prompt)
+
+        with st.chat_message("assistant"):
+            placeholder = st.empty()
             try:
-                with st.spinner("Searching your reel knowledge base..."):
+                with st.spinner("Thinking..."):
                     resp = requests.post(
                         f"{API_BASE}/query",
-                        json={"query": query, "top_k": top_k},
+                        json={"query": prompt, "top_k": top_k},
                         timeout=60,
                     )
                     resp.raise_for_status()
@@ -398,19 +417,48 @@ with tabs[1]:
                 results = data.get("results", [])
 
                 if not results:
-                    st.info("No matching reels found yet. Try saving some first.")
+                    full_reply = (
+                        "I could not find matching reels yet. Save a few reels first, then try again."
+                    )
                 else:
+                    lines = ["Here is what I found from your saved reels:\n"]
                     for idx, r in enumerate(results, start=1):
-                        with st.container(border=True):
-                            st.markdown(
-                                f'<div class="travel-result-title">Result #{idx}</div>',
-                                unsafe_allow_html=True,
-                            )
-                            st.markdown(f"**Score:** `{r['score']:.3f}`")
-                            st.markdown(f"**URL:** {r['url']}")
+                        enrichment = r.get("enrichment") or {}
+                        place = enrichment.get("place_name") or "Unknown place"
+                        city = enrichment.get("city")
+                        country = enrichment.get("country")
+                        location = ", ".join([x for x in [city, country] if x]) or "Unknown location"
+                        summary = enrichment.get("summary") or r.get("summary") or ""
+                        summary = re.sub(r"\s+", " ", summary).strip()
+                        lines.append(
+                            f"{idx}. **{place}** ({location}) - {summary}\n   Source: {r['url']}"
+                        )
+                    full_reply = "\n\n".join(lines)
+
+                def typewriter_stream(text: str):
+                    for token in text.split(" "):
+                        yield token + " "
+                        time.sleep(0.02)
+
+                placeholder.write_stream(typewriter_stream(full_reply))
+                st.session_state.chat_messages.append(
+                    {"role": "assistant", "content": full_reply, "results": results}
+                )
+
+                if results:
+                    with st.expander("Sources", expanded=False):
+                        for idx, r in enumerate(results, start=1):
+                            st.markdown(f"**Result #{idx}** | score `{r['score']:.3f}`")
+                            st.markdown(f"URL: {r['url']}")
                             if r.get("enrichment"):
                                 render_enrichment(r["enrichment"])
                             st.caption(f"Reel ID: {r['reel_id']}")
+                            if idx < len(results):
+                                st.divider()
             except Exception as e:
-                st.error(f"Error querying reels: {e}")
+                error_text = f"I hit an error while searching your reels: {e}"
+                placeholder.markdown(error_text)
+                st.session_state.chat_messages.append(
+                    {"role": "assistant", "content": error_text, "results": None}
+                )
 
