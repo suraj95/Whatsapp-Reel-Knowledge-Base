@@ -7,10 +7,37 @@ import subprocess
 import tempfile
 from functools import lru_cache
 from typing import Any, Dict, List, Optional, Tuple
+from urllib.parse import parse_qsl, urlsplit, urlunsplit, urlencode
 
 from openai import OpenAI
 import requests
 from yt_dlp import YoutubeDL
+
+
+def strip_igsh_parameter(url: str) -> str:
+    """
+    Remove Instagram tracking parameter `igsh` from the URL query string.
+
+    This improves privacy by avoiding propagating tracking params to AI prompts
+    and persisted metadata.
+    """
+    if not url:
+        return url
+
+    try:
+        parts = urlsplit(url)
+        if not parts.query:
+            return url
+
+        qsl = parse_qsl(parts.query, keep_blank_values=True)
+        filtered_qsl = [(k, v) for (k, v) in qsl if k.lower() != "igsh"]
+
+        new_query = urlencode(filtered_qsl, doseq=True)
+        # urlunsplit omits the '?' when new_query is empty.
+        return urlunsplit((parts.scheme, parts.netloc, parts.path, new_query, parts.fragment))
+    except Exception:
+        # Best-effort: if parsing fails, return original URL.
+        return url
 
 
 def _locationiq_geocode(query: str) -> Dict:

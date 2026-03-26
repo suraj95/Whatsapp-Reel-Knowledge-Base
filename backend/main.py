@@ -14,6 +14,7 @@ from .helpers import (
     extract_reel_metadata_with_yt_dlp,
     enrich_reel_summary,
     format_enrichment_for_metadata,
+    strip_igsh_parameter,
     summarize_video_with_gpt4o,
 )
 from .models import (
@@ -58,9 +59,10 @@ app = FastAPI(title="WhatsApp Reel Knowledge Base")
 
 @app.post("/reels", response_model=AddReelResponse)
 async def add_reel(payload: AddReelRequest):
+    reel_url = strip_igsh_parameter(payload.url)
     # 1. Summarize the reel with GPT-4o (vision-capable) using downloaded frames
     try:
-        summary = summarize_video_with_gpt4o(client, payload.url)
+        summary = summarize_video_with_gpt4o(client, reel_url)
     except Exception as e:
         # Most likely: private / blocked / unsupported URL or yt-dlp/ffmpeg error
         message = str(e)
@@ -84,17 +86,17 @@ async def add_reel(payload: AddReelRequest):
     # 3b. Enrich summary using an agentic flow
     # Also extract text metadata from the reel URL (description/hashtags/location tag)
     # to improve location detection when the vision summary alone is incomplete.
-    reel_metadata = extract_reel_metadata_with_yt_dlp(payload.url)
+    reel_metadata = extract_reel_metadata_with_yt_dlp(reel_url)
     enrichment = await enrich_reel_summary(
         summary,
-        reel_url=payload.url,
+        reel_url=reel_url,
         reel_metadata=reel_metadata,
     )
     enrichment_metadata, enrichment_json = format_enrichment_for_metadata(enrichment)
 
     # 4. Build embedding using summary + tags
     doc_text = (
-        f"URL: {payload.url}\n"
+        f"URL: {reel_url}\n"
         f"SUMMARY: {summary}\n"
         f"TAGS: {', '.join(auto_tags)}\n"
     )
@@ -109,7 +111,7 @@ async def add_reel(payload: AddReelRequest):
                 "id": reel_id,
                 "values": embedding,
                 "metadata": {
-                    "url": payload.url,
+                    "url": reel_url,
                     "summary": summary,
                     "tags": auto_tags,
                     "doc_text": doc_text,
@@ -169,7 +171,7 @@ def query_reels(payload: QueryRequest):
         results.append(
             ReelResult(
                 reel_id=match.id,
-                url=meta.get("url", ""),
+                url=strip_igsh_parameter(meta.get("url", "")),
                 summary=meta.get("summary", ""),
                 auto_tags=meta.get("tags", []),
                 score=score,
