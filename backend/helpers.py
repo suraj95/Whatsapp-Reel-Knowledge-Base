@@ -6,7 +6,7 @@ import re
 import subprocess
 import tempfile
 from functools import lru_cache
-from typing import Dict, List, Optional, Tuple
+from typing import Any, Dict, List, Optional, Tuple
 
 from openai import OpenAI
 import requests
@@ -86,6 +86,84 @@ def _approximate_coordinates(
         if lat is not None and lng is not None:
             return lat, lng, geo.get("city"), geo.get("country")
     return None, None, None, None
+
+
+def extract_reel_metadata_with_yt_dlp(reel_url: str) -> Dict[str, Any]:
+    """
+    Best-effort metadata extraction from the reel URL using yt-dlp.
+    This typically includes title + description + tags/hashtags.
+    """
+    if not reel_url:
+        return {}
+
+    ydl_opts = {
+        "quiet": True,
+        "no_warnings": True,
+        # We only need metadata; do not download the file here.
+        "skip_download": True,
+    }
+
+    try:
+        with YoutubeDL(ydl_opts) as ydl:
+            info = ydl.extract_info(reel_url, download=False)
+    except Exception:
+        return {}
+
+    if not isinstance(info, dict):
+        return {}
+
+    title = info.get("title")
+    description = info.get("description") or info.get("full_description")
+
+    # yt-dlp may return location in various fields depending on extractor.
+    location_tag = (
+        info.get("location")
+        or info.get("location_name")
+        or info.get("place")
+        or info.get("region")
+    )
+
+    tags = info.get("tags") or []
+    if not isinstance(tags, list):
+        tags = []
+
+    # Extract hashtags from description and tags.
+    hashtags: List[str] = []
+    if isinstance(description, str):
+        hashtags.extend(re.findall(r"#([A-Za-z0-9_]+)", description))
+    for t in tags:
+        if isinstance(t, str) and t.strip():
+            hashtags.append(t.strip().lstrip("#"))
+
+    # Keep the prompt payload small.
+    def _truncate(s: str, n: int) -> str:
+        s = (s or "").strip()
+        if len(s) <= n:
+            return s
+        return s[: n - 3].rstrip() + "..."
+
+    description_t = _truncate(description, 1800)
+    title_t = _truncate(title, 250)
+    hashtags_u = list(dict.fromkeys([h.lower() for h in hashtags if h and h.strip()]))
+    hashtags_t = _truncate(", ".join(hashtags_u[:30]), 800)
+
+    metadata_text_parts = []
+    if title_t:
+        metadata_text_parts.append(f"TITLE: {title_t}")
+    if description_t:
+        metadata_text_parts.append(f"DESCRIPTION: {description_t}")
+    if hashtags_t:
+        metadata_text_parts.append(f"HASHTAGS: {hashtags_t}")
+    if location_tag and isinstance(location_tag, str) and location_tag.strip():
+        metadata_text_parts.append(f"LOCATION_TAG: {_truncate(location_tag, 250)}")
+
+    return {
+        "title": title_t,
+        "description": description_t,
+        "hashtags": hashtags_u[:30],
+        "location_tag": location_tag,
+        "metadata_text": "\n".join(metadata_text_parts).strip(),
+    }
 
 
 def _extract_frames(video_path: str, frames_dir: str) -> List[str]:
@@ -308,6 +386,9 @@ If the summary mentions a specific place or restaurant:
 1) Use search_place_details to get coordinates and rating
 2) Use TavilySearchResults if the place name is unclear
 
+You may also receive additional reel metadata (TITLE/DESCRIPTION/HASHTAGS/LOCATION_TAG)
+that often contains the correct place even when the vision summary is incomplete.
+
 Return ONLY valid JSON in this exact schema:
 {
   "place_name": string|null,
@@ -367,6 +448,8 @@ def _normalize_enrichment(payload: Dict, vision_summary: str) -> Dict:
             return None
 
     place_name = payload.get("place_name")
+    if isinstance(place_name, str) and place_name.strip().lower() in {"unknown", "n/a", "none", ""}:
+        place_name = None
     city = payload.get("city")
     country = payload.get("country")
     lat = _as_float(payload.get("lat"))
@@ -436,17 +519,32 @@ def _parse_enrichment_output(raw_output: str, vision_summary: str) -> Dict:
     return _normalize_enrichment(parsed, vision_summary)
 
 
-async def enrich_reel_summary(vision_summary: str) -> Dict:
+async def enrich_reel_summary(
+    vision_summary: str,
+    reel_url: Optional[str] = None,
+    reel_metadata: Optional[Dict[str, Any]] = None,
+) -> Dict:
     """
     Enrich a raw visual summary into structured travel/food metadata.
     """
     executor = _get_enrichment_executor()
+    metadata_text = ""
+    if isinstance(reel_metadata, dict):
+        metadata_text = reel_metadata.get("metadata_text") or ""
+
+    # Optional: include reel URL for better grounding.
+    reel_url_line = f"Reel URL: {reel_url}" if reel_url else ""
+
     result = await executor.ainvoke(
         {
             "messages": [
                 {
                     "role": "user",
-                    "content": f"Vision summary: {vision_summary}",
+                    "content": (
+                        f"Vision summary: {vision_summary}\n"
+                        f"{reel_url_line}\n\n"
+                        f"Additional reel metadata (description/hashtags/location tags):\n{metadata_text}"
+                    ),
                 }
             ]
         }

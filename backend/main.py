@@ -11,6 +11,7 @@ from pinecone import Pinecone
 from .helpers import (
     auto_tag_text,
     embed_text,
+    extract_reel_metadata_with_yt_dlp,
     enrich_reel_summary,
     format_enrichment_for_metadata,
     summarize_video_with_gpt4o,
@@ -81,7 +82,14 @@ async def add_reel(payload: AddReelRequest):
         )
 
     # 3b. Enrich summary using an agentic flow
-    enrichment = await enrich_reel_summary(summary)
+    # Also extract text metadata from the reel URL (description/hashtags/location tag)
+    # to improve location detection when the vision summary alone is incomplete.
+    reel_metadata = extract_reel_metadata_with_yt_dlp(payload.url)
+    enrichment = await enrich_reel_summary(
+        summary,
+        reel_url=payload.url,
+        reel_metadata=reel_metadata,
+    )
     enrichment_metadata, enrichment_json = format_enrichment_for_metadata(enrichment)
 
     # 4. Build embedding using summary + tags
