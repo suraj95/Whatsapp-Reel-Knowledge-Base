@@ -2,7 +2,6 @@ import requests
 import streamlit as st
 import pandas as pd
 import base64
-from html import escape
 from pathlib import Path
 import re
 
@@ -138,13 +137,45 @@ def _inject_travel_theme() -> None:
           div[data-baseweb="select"] select,
           textarea {
             border-radius: 12px !important;
+            border: 2px solid rgba(30,58,95,0.38) !important;
+            background: rgba(255,255,255,0.92) !important;
+            box-shadow: 0 2px 10px rgba(15,23,42,0.05);
+          }
+          div[data-testid="stTextInput"] input:focus,
+          textarea:focus {
+            border: 2px solid rgba(14,165,233,0.85) !important;
+            box-shadow: 0 0 0 2px rgba(14,165,233,0.18) !important;
           }
 
           .stButton > button {
             border-radius: 12px !important;
             font-weight: 600 !important;
-            border: 1px solid rgba(30,58,95,0.14) !important;
+            border: 2px solid rgba(30,58,95,0.28) !important;
             background: linear-gradient(135deg, rgba(56, 189, 248, 0.20), rgba(251, 191, 36, 0.18)) !important;
+          }
+
+          /* Messages / "chat-like" feedback boxes */
+          div[data-testid="stAlert"] {
+            border: 2px solid rgba(30,58,95,0.28) !important;
+            border-radius: 14px !important;
+            background: rgba(255,255,255,0.88) !important;
+          }
+
+          /* Make map area clearly bounded */
+          div[data-testid="stMap"],
+          div[data-testid="stDeckGlJsonChart"],
+          div[data-testid="stVegaLiteChart"] {
+            border: 2px solid rgba(30,58,95,0.34) !important;
+            border-radius: 14px !important;
+            overflow: hidden !important;
+            box-shadow: 0 8px 18px rgba(15,23,42,0.08);
+          }
+
+          /* Numbered result boxes */
+          .travel-result-title {
+            font-weight: 800;
+            color: rgba(30,58,95,0.95);
+            margin-bottom: 8px;
           }
 
           /* Travel summary boundary (numbered list) */
@@ -161,12 +192,10 @@ def _inject_travel_theme() -> None:
             color: rgba(30,58,95,0.92);
             margin-bottom: 6px;
           }
-          .travel-summary-list {
+          .travel-summary-text {
             margin: 0;
-            padding-left: 18px;
-          }
-          .travel-summary-list li {
-            margin: 6px 0;
+            line-height: 1.5;
+            color: rgba(15,23,42,0.92);
           }
 
           /* Fancy robotic animation */
@@ -264,42 +293,6 @@ _inject_travel_theme()
 tabs = st.tabs(["Save new reel", "Ask questions"])
 
 
-def _summary_to_numbered_items(summary: str, max_items: int = 6) -> list[str]:
-    """
-    Convert a raw LLM/enrichment summary into a clean list of items.
-
-    - If the text already contains newlines/bullets, use those as items.
-    - Otherwise split into sentences and keep the first few.
-    """
-    if not summary:
-        return []
-
-    s = str(summary).strip()
-    s = s.replace("\r\n", "\n").replace("\r", "\n")
-
-    def _clean_item(t: str) -> str:
-        t = t.strip()
-        # Remove leading bullets or numbering like "1.", "2)", "- ", "• "
-        t = re.sub(r"^(?:\d+[\.\)]|[-*•])\s*", "", t).strip()
-        return t
-
-    # Case 1: multi-line content -> use each non-empty line as an item
-    lines = [ln.strip() for ln in s.split("\n") if ln.strip()]
-    if len(lines) > 1:
-        items = [_clean_item(ln) for ln in lines if _clean_item(ln)]
-        return items[:max_items]
-
-    # Case 2: single line -> split into sentences
-    sentences = re.split(r"(?<=[.!?])\s+", s)
-    sentences = [x.strip() for x in sentences if x.strip()]
-    if len(sentences) > 1:
-        return sentences[:max_items]
-
-    # Case 3: fallback split by common separators
-    parts = [p.strip() for p in re.split(r"\s*(?:;|/|•|-)\s*", s) if p.strip()]
-    return parts[:max_items] if parts else [s]
-
-
 def render_enrichment(enrichment: dict):
     place_name = enrichment.get("place_name") or "Unknown place"
     city = enrichment.get("city")
@@ -327,20 +320,18 @@ def render_enrichment(enrichment: dict):
     if cuisine:
         st.markdown(f"**Cuisine:** {cuisine}")
     if summary:
-        items = _summary_to_numbered_items(summary)
-        if items:
-            items_html = "".join(f"<li>{escape(item)}</li>" for item in items)
-            st.markdown(
-                f"""
-                <div class="travel-summary-boundary">
-                  <div class="travel-summary-title">Summary</div>
-                  <ol class="travel-summary-list">
-                    {items_html}
-                  </ol>
-                </div>
-                """,
-                unsafe_allow_html=True,
-            )
+        summary_text = str(summary).strip()
+        summary_text = re.sub(r"^(?:\d+[\.\)]|[-*•])\s*", "", summary_text)
+        summary_text = summary_text.replace("\n", "<br/>")
+        st.markdown(
+            f"""
+            <div class="travel-summary-boundary">
+              <div class="travel-summary-title">Summary</div>
+              <p class="travel-summary-text">{summary_text}</p>
+            </div>
+            """,
+            unsafe_allow_html=True,
+        )
     if tags:
         st.markdown("**tags:** " + ", ".join(tags))
 
@@ -409,13 +400,17 @@ with tabs[1]:
                 if not results:
                     st.info("No matching reels found yet. Try saving some first.")
                 else:
-                    for r in results:
-                        st.markdown("---")
-                        st.markdown(f"**Score:** `{r['score']:.3f}`")
-                        st.markdown(f"**URL:** {r['url']}")
-                        if r.get("enrichment"):
-                            render_enrichment(r["enrichment"])
-                        st.caption(f"Reel ID: {r['reel_id']}")
+                    for idx, r in enumerate(results, start=1):
+                        with st.container(border=True):
+                            st.markdown(
+                                f'<div class="travel-result-title">Result #{idx}</div>',
+                                unsafe_allow_html=True,
+                            )
+                            st.markdown(f"**Score:** `{r['score']:.3f}`")
+                            st.markdown(f"**URL:** {r['url']}")
+                            if r.get("enrichment"):
+                                render_enrichment(r["enrichment"])
+                            st.caption(f"Reel ID: {r['reel_id']}")
             except Exception as e:
                 st.error(f"Error querying reels: {e}")
 
