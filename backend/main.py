@@ -54,7 +54,7 @@ if INDEX_NAME not in existing_indexes:
 index = pc.Index(INDEX_NAME)
 
 # ---- FastAPI app ----
-app = FastAPI(title="WhatsApp Reel Knowledge Base")
+app = FastAPI(title="Travel Reels Knowledge Base")
 
 
 @app.post("/reels", response_model=AddReelResponse)

@@ -1,6 +1,6 @@
-## WhatsApp Reel Knowledge Base 🎥🧠
+## Travel Reels Knowledge Base 🎥🧠
 
-A small AI project that turns **Instagram / WhatsApp reels into a searchable knowledge base**.
+A small AI project that turns **Travel reels into a searchable knowledge base**.
 
 ## The Problem 🤔
 
