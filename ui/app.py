@@ -34,6 +34,7 @@ def _inject_travel_theme() -> None:
             position: fixed;
             inset: 0;
             z-index: 0;
+            pointer-events: none;
             background:
               radial-gradient(circle at 10% 20%, rgba(56, 189, 248, 0.22), transparent 45%),
               radial-gradient(circle at 80% 10%, rgba(251, 191, 36, 0.18), transparent 40%),
@@ -49,8 +50,9 @@ def _inject_travel_theme() -> None:
             background-size: cover;
             background-position: center;
             opacity: 0.35;
-            filter: saturate(1.15) blur(1px);
+            filter: saturate(1.08) blur(0.6px);
             transform: scale(1.02);
+            pointer-events: none;
           }
 
           .travel-bg::after {
