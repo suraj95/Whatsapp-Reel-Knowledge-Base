@@ -5,6 +5,7 @@ import base64
 from pathlib import Path
 import re
 import time
+import pydeck as pdk
 from constants import CHAT_TOP_K
 
 API_BASE = "http://localhost:8000"
@@ -322,7 +323,7 @@ if "chat_messages" not in st.session_state:
     ]
 
 
-def render_enrichment(enrichment: dict):
+def render_enrichment(enrichment: dict, show_map: bool = True):
     place_name = enrichment.get("place_name") or "Unknown place"
     city = enrichment.get("city")
     country = enrichment.get("country")
@@ -364,7 +365,7 @@ def render_enrichment(enrichment: dict):
     if tags:
         st.markdown("**tags:** " + ", ".join(tags))
 
-    if lat is not None and lng is not None:
+    if show_map and lat is not None and lng is not None:
         st.caption("Approximate location")
         try:
             map_df = pd.DataFrame([{"lat": float(lat), "lon": float(lng)}])
@@ -376,19 +377,45 @@ def render_enrichment(enrichment: dict):
 def render_map_points(map_points: list):
     if not map_points:
         return
-    rows = []
-    for point in map_points:
-        lat = point.get("lat")
-        lng = point.get("lng")
-        if lat is None or lng is None:
-            continue
-        try:
-            rows.append({"lat": float(lat), "lon": float(lng)})
-        except Exception:
-            continue
-    if rows:
-        st.caption("Map view")
-        st.map(pd.DataFrame(rows), zoom=4)
+    top = map_points[0]
+    lat = top.get("lat")
+    lng = top.get("lng")
+    if lat is None or lng is None:
+        return
+    try:
+        lat_f = float(lat)
+        lng_f = float(lng)
+    except Exception:
+        return
+
+    label = top.get("city") or top.get("place_name") or "Top match"
+    df = pd.DataFrame([{"lat": lat_f, "lng": lng_f, "label": label}])
+
+    scatter_layer = pdk.Layer(
+        "ScatterplotLayer",
+        data=df,
+        get_position="[lng, lat]",
+        get_radius=120,
+        get_fill_color=[220, 38, 38, 200],
+        pickable=True,
+    )
+    text_layer = pdk.Layer(
+        "TextLayer",
+        data=df,
+        get_position="[lng, lat]",
+        get_text="label",
+        get_size=16,
+        get_color=[15, 23, 42, 220],
+        get_alignment_baseline="'top'",
+        get_pixel_offset=[0, 14],
+    )
+    deck = pdk.Deck(
+        layers=[scatter_layer, text_layer],
+        initial_view_state=pdk.ViewState(latitude=lat_f, longitude=lng_f, zoom=10, pitch=0),
+        tooltip={"text": "{label}"},
+    )
+    st.caption("Top location")
+    st.pydeck_chart(deck, use_container_width=True)
 
 
 def render_intent_cards(intent: str, cards: list):
@@ -426,6 +453,53 @@ def render_intent_cards(intent: str, cards: list):
                 st.markdown(line)
         st.divider()
 
+
+def split_narrative_and_question(text: str):
+    text = (text or "").strip()
+    if not text:
+        return "", ""
+    question_match = re.search(r"([^?]*\?)\s*$", text)
+    if not question_match:
+        return text, ""
+    question = question_match.group(1).strip()
+    body = text[: question_match.start()].strip()
+    return body, question
+
+
+def render_results_boxes(results: list):
+    if not results:
+        return
+    st.markdown("#### Results")
+    for idx, r in enumerate(results, start=1):
+        enrichment = r.get("enrichment") or {}
+        place_name = enrichment.get("place_name") or "Saved reel"
+        city = enrichment.get("city")
+        country = enrichment.get("country")
+        location = ", ".join([x for x in [city, country] if x])
+        title = f"Result #{idx} - {place_name}"
+        if location:
+            title += f" ({location})"
+
+        with st.expander(title, expanded=False):
+            summary = enrichment.get("summary") or r.get("summary") or "No summary available."
+            score = r.get("score", 0.0)
+            st.markdown(
+                f"<div style='font-size:0.86rem; color:#334155;'>"
+                f"Score: {float(score):.3f}</div>",
+                unsafe_allow_html=True,
+            )
+            st.markdown(
+                f"<div style='font-size:0.88rem; line-height:1.45;'>{summary}</div>",
+                unsafe_allow_html=True,
+            )
+            url = r.get("url")
+            if url:
+                st.markdown(
+                    f"<div style='font-size:0.86rem; margin-top:6px;'>"
+                    f"<a href='{url}' target='_blank'>Open reel</a></div>",
+                    unsafe_allow_html=True,
+                )
+
 # ---------- TAB 1: SAVE REEL ----------
 with tabs[0]:
     st.subheader("Save a new reel")
@@ -457,21 +531,15 @@ with tabs[1]:
 
     for message in st.session_state.chat_messages:
         with st.chat_message(message["role"]):
-            st.markdown(message["content"])
+            body_text, question_text = split_narrative_and_question(message["content"])
+            st.markdown(body_text or message["content"])
             if message["role"] == "assistant" and message.get("agentic"):
                 agentic = message["agentic"]
-                render_map_points(agentic.get("map_points", []))
-                render_intent_cards(agentic.get("intent", "search"), agentic.get("cards", []))
+                intent = agentic.get("intent", "search")
+                if intent != "recommendation":
+                    render_map_points(agentic.get("map_points", []))
             if message["role"] == "assistant" and message.get("results"):
-                with st.expander("Sources", expanded=False):
-                    for idx, r in enumerate(message["results"], start=1):
-                        st.markdown(f"**Result #{idx}** | score `{r['score']:.3f}`")
-                        st.markdown(f"URL: {r['url']}")
-                        if r.get("enrichment"):
-                            render_enrichment(r["enrichment"])
-                        st.caption(f"Reel ID: {r['reel_id']}")
-                        if idx < len(message["results"]):
-                            st.divider()
+                render_results_boxes(message["results"])
 
     prompt = st.chat_input("Ask something about your reels...")
     if prompt:
@@ -503,14 +571,15 @@ with tabs[1]:
                         "I could not find matching reels yet. Save a few reels first, then try again."
                     )
                 else:
-                    full_reply = f"{narrative}\n\nIntent: **{intent}**"
+                    full_reply = narrative
 
                 def typewriter_stream(text: str):
                     for token in text.split(" "):
                         yield token + " "
                         time.sleep(0.02)
 
-                placeholder.write_stream(typewriter_stream(full_reply))
+                body_text, question_text = split_narrative_and_question(full_reply)
+                placeholder.write_stream(typewriter_stream(body_text or full_reply))
                 st.session_state.chat_messages.append(
                     {
                         "role": "assistant",
@@ -524,21 +593,11 @@ with tabs[1]:
                     }
                 )
 
-                if map_points:
+                if map_points and intent != "recommendation":
                     render_map_points(map_points)
-                if cards:
-                    render_intent_cards(intent, cards)
 
                 if results:
-                    with st.expander("Sources", expanded=False):
-                        for idx, r in enumerate(results, start=1):
-                            st.markdown(f"**Result #{idx}** | score `{r['score']:.3f}`")
-                            st.markdown(f"URL: {r['url']}")
-                            if r.get("enrichment"):
-                                render_enrichment(r["enrichment"])
-                            st.caption(f"Reel ID: {r['reel_id']}")
-                            if idx < len(results):
-                                st.divider()
+                    render_results_boxes(results)
             except Exception as e:
                 error_text = f"I hit an error while searching your reels: {e}"
                 placeholder.markdown(error_text)

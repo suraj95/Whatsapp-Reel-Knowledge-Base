@@ -617,3 +617,60 @@ def format_enrichment_for_metadata(enrichment: Dict) -> Tuple[Dict, str]:
     payload = json.dumps(enrichment)
     return metadata, payload
 
+
+def format_conversational_query_response(
+    client: OpenAI,
+    query: str,
+    places: List[Dict[str, Any]],
+) -> str:
+    """
+    Format a concise, conversational response from retrieved places only.
+    Uses a single LLM call and forbids adding places not present in input.
+    """
+    if not places:
+        return (
+            "I could not find matching places from your saved reels yet. "
+            "Do you want help with what to search or save next?"
+        )
+
+    compact_places: List[Dict[str, Any]] = []
+    for place in places[:8]:
+        compact_places.append(
+            {
+                "place_name": place.get("place_name"),
+                "city": place.get("city"),
+                "country": place.get("country"),
+                "category": place.get("category"),
+                "score": place.get("score"),
+                "summary": place.get("summary"),
+            }
+        )
+
+    response = client.chat.completions.create(
+        model="gpt-4o-mini",
+        temperature=0.2,
+        messages=[
+            {
+                "role": "system",
+                "content": (
+                    "You are a travel assistant.\n"
+                    "Write a short, natural, conversational response.\n"
+                    "Use ONLY the places provided by the user context.\n"
+                    "Do NOT invent place names, cities, countries, ratings, or facts.\n"
+                    "Briefly explain why each mentioned place is relevant to the query.\n"
+                "Keep it concise and clean, ChatGPT-like tone, no markdown headings.\n"
+                "IMPORTANT: End with exactly one short follow-up question relevant to trip planning, "
+                "such as transport, nearby stay options, itinerary, budget, or best time to visit."
+                ),
+            },
+            {
+                "role": "user",
+                "content": (
+                    f"User query: {query}\n\n"
+                    f"Retrieved places JSON: {json.dumps(compact_places, ensure_ascii=True)}"
+                ),
+            },
+        ],
+    )
+    return (response.choices[0].message.content or "").strip()
+

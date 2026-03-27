@@ -50,11 +50,11 @@ Example queries:
 
 ### Paste the Reel URL and get AI Generated Summary
 
-![Summary Placeholder](./docs/images/reel_summary_placeholder.png)
+![Summary Placeholder](./docs/images/save_reel.png)
 
 ### Search the Knowledge Base
 
-![Search Placeholder](./docs/images/reel_search_placeholder.png)
+![Search Placeholder](./docs/images/search_reel.png)
 
 ---
 
