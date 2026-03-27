@@ -6,11 +6,86 @@ from openai import OpenAI
 from .handlers.recommendation_handler import handle_recommendation
 from .handlers.search_handler import handle_search
 from .handlers.trip_planner_handler import handle_trip_planning
-from .helpers import embed_text
+from .helpers import embed_text, format_conversational_query_response
 from .intent import detect_intent
 from .models import AgenticQueryResponse, QueryIntent
 
 logger = logging.getLogger(__name__)
+
+MIN_RESULT_SCORE = 0.35
+
+
+def _build_place_payload(response: AgenticQueryResponse):
+    payload = []
+    for source in response.sources:
+        enrichment = source.enrichment
+        payload.append(
+            {
+                "place_name": enrichment.place_name if enrichment else None,
+                "city": enrichment.city if enrichment else None,
+                "country": enrichment.country if enrichment else None,
+                "category": enrichment.category if enrichment else None,
+                "summary": enrichment.summary if enrichment else source.summary,
+                "score": source.score,
+            }
+        )
+    return payload
+
+
+def _post_process_response(response: AgenticQueryResponse, query: str, client: OpenAI) -> AgenticQueryResponse:
+    all_sources = response.sources or []
+    kept_sources = [source for source in all_sources if source.score >= MIN_RESULT_SCORE]
+    kept_reel_ids = {source.reel_id for source in kept_sources}
+    kept_urls = {source.url for source in kept_sources}
+
+    filtered_cards = []
+    for card in response.cards:
+        if card.reel_id:
+            if card.reel_id in kept_reel_ids:
+                filtered_cards.append(card)
+            continue
+
+        places = list((card.metadata or {}).get("places") or [])
+        if places:
+            kept_places = [p for p in places if p.get("source_url") in kept_urls]
+            card.metadata["places"] = kept_places
+            if kept_places:
+                filtered_cards.append(card)
+            continue
+
+        filtered_cards.append(card)
+
+    response.sources = kept_sources
+    response.map_points = [point for point in response.map_points if point.reel_id in kept_reel_ids]
+    response.cards = filtered_cards
+    response.meta.result_count = len(response.sources)
+    response.meta.map_points_count = len(response.map_points)
+    response.meta.applied_filters["min_result_score"] = MIN_RESULT_SCORE
+    response.meta.applied_filters["dropped_low_confidence"] = max(0, len(all_sources) - len(kept_sources))
+
+    if not response.sources:
+        response.narrative = (
+            "I found only low-confidence matches this time. Try rephrasing or save more reels. "
+            "Do you want me to suggest a better query to find places faster?"
+        )
+        return response
+
+    place_payload = _build_place_payload(response)
+    try:
+        narrative = format_conversational_query_response(
+            client=client,
+            query=query,
+            places=place_payload,
+        )
+        if narrative:
+            response.narrative = narrative
+    except Exception:
+        response.narrative = (
+            f"I found {len(response.sources)} relevant places from your saved reels. "
+            "Would you like help with how to get there or nearby places to stay?"
+        )
+
+    return response
 
 
 def handle_query_agentic(query: str, top_k: int, client: OpenAI, index: Any) -> AgenticQueryResponse:
@@ -39,6 +114,8 @@ def handle_query_agentic(query: str, top_k: int, client: OpenAI, index: Any) -> 
             top_k=top_k,
             intent_result=intent_result,
         )
+
+    response = _post_process_response(response=response, query=query, client=client)
 
     logger.info(
         "agentic_query route=%s intent=%s confidence=%.2f results=%d map_points=%d",

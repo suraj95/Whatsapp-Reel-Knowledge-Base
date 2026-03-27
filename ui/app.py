@@ -5,6 +5,7 @@ import base64
 from pathlib import Path
 import re
 import time
+import pydeck as pdk
 from constants import CHAT_TOP_K
 
 API_BASE = "http://localhost:8000"
@@ -322,7 +323,7 @@ if "chat_messages" not in st.session_state:
     ]
 
 
-def render_enrichment(enrichment: dict):
+def render_enrichment(enrichment: dict, show_map: bool = True):
     place_name = enrichment.get("place_name") or "Unknown place"
     city = enrichment.get("city")
     country = enrichment.get("country")
@@ -364,7 +365,7 @@ def render_enrichment(enrichment: dict):
     if tags:
         st.markdown("**tags:** " + ", ".join(tags))
 
-    if lat is not None and lng is not None:
+    if show_map and lat is not None and lng is not None:
         st.caption("Approximate location")
         try:
             map_df = pd.DataFrame([{"lat": float(lat), "lon": float(lng)}])
@@ -376,19 +377,45 @@ def render_enrichment(enrichment: dict):
 def render_map_points(map_points: list):
     if not map_points:
         return
-    rows = []
-    for point in map_points:
-        lat = point.get("lat")
-        lng = point.get("lng")
-        if lat is None or lng is None:
-            continue
-        try:
-            rows.append({"lat": float(lat), "lon": float(lng)})
-        except Exception:
-            continue
-    if rows:
-        st.caption("Map view")
-        st.map(pd.DataFrame(rows), zoom=4)
+    top = map_points[0]
+    lat = top.get("lat")
+    lng = top.get("lng")
+    if lat is None or lng is None:
+        return
+    try:
+        lat_f = float(lat)
+        lng_f = float(lng)
+    except Exception:
+        return
+
+    label = top.get("city") or top.get("place_name") or "Top match"
+    df = pd.DataFrame([{"lat": lat_f, "lng": lng_f, "label": label}])
+
+    scatter_layer = pdk.Layer(
+        "ScatterplotLayer",
+        data=df,
+        get_position="[lng, lat]",
+        get_radius=120,
+        get_fill_color=[220, 38, 38, 200],
+        pickable=True,
+    )
+    text_layer = pdk.Layer(
+        "TextLayer",
+        data=df,
+        get_position="[lng, lat]",
+        get_text="label",
+        get_size=16,
+        get_color=[15, 23, 42, 220],
+        get_alignment_baseline="'top'",
+        get_pixel_offset=[0, 14],
+    )
+    deck = pdk.Deck(
+        layers=[scatter_layer, text_layer],
+        initial_view_state=pdk.ViewState(latitude=lat_f, longitude=lng_f, zoom=10, pitch=0),
+        tooltip={"text": "{label}"},
+    )
+    st.caption("Top location")
+    st.pydeck_chart(deck, use_container_width=True)
 
 
 def render_intent_cards(intent: str, cards: list):
@@ -460,15 +487,17 @@ with tabs[1]:
             st.markdown(message["content"])
             if message["role"] == "assistant" and message.get("agentic"):
                 agentic = message["agentic"]
-                render_map_points(agentic.get("map_points", []))
-                render_intent_cards(agentic.get("intent", "search"), agentic.get("cards", []))
+                intent = agentic.get("intent", "search")
+                if intent != "recommendation":
+                    render_map_points(agentic.get("map_points", []))
+                    render_intent_cards(intent, agentic.get("cards", []))
             if message["role"] == "assistant" and message.get("results"):
                 with st.expander("Sources", expanded=False):
                     for idx, r in enumerate(message["results"], start=1):
                         st.markdown(f"**Result #{idx}** | score `{r['score']:.3f}`")
                         st.markdown(f"URL: {r['url']}")
                         if r.get("enrichment"):
-                            render_enrichment(r["enrichment"])
+                            render_enrichment(r["enrichment"], show_map=False)
                         st.caption(f"Reel ID: {r['reel_id']}")
                         if idx < len(message["results"]):
                             st.divider()
@@ -503,7 +532,7 @@ with tabs[1]:
                         "I could not find matching reels yet. Save a few reels first, then try again."
                     )
                 else:
-                    full_reply = f"{narrative}\n\nIntent: **{intent}**"
+                    full_reply = narrative
 
                 def typewriter_stream(text: str):
                     for token in text.split(" "):
@@ -524,9 +553,9 @@ with tabs[1]:
                     }
                 )
 
-                if map_points:
+                if map_points and intent != "recommendation":
                     render_map_points(map_points)
-                if cards:
+                if cards and intent != "recommendation":
                     render_intent_cards(intent, cards)
 
                 if results:
@@ -535,7 +564,7 @@ with tabs[1]:
                             st.markdown(f"**Result #{idx}** | score `{r['score']:.3f}`")
                             st.markdown(f"URL: {r['url']}")
                             if r.get("enrichment"):
-                                render_enrichment(r["enrichment"])
+                                render_enrichment(r["enrichment"], show_map=False)
                             st.caption(f"Reel ID: {r['reel_id']}")
                             if idx < len(results):
                                 st.divider()
