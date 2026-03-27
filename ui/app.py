@@ -5,6 +5,7 @@ import base64
 from pathlib import Path
 import re
 import time
+from constants import CHAT_TOP_K
 
 API_BASE = "http://localhost:8000"
 FAVICON_PATH = Path(__file__).resolve().parents[1] / "docs" / "images" / "flight_4283062.png"
@@ -192,6 +193,25 @@ def _inject_travel_theme() -> None:
             margin-bottom: 8px;
           }
 
+          /* Keep chat composer fixed to viewport bottom */
+          div[data-testid="stChatInput"] {
+            position: fixed !important;
+            left: 50%;
+            transform: translateX(-50%);
+            bottom: max(10px, env(safe-area-inset-bottom));
+            width: min(736px, calc(100vw - 2rem));
+            z-index: 9999;
+            padding: 0.35rem;
+            border-radius: 14px;
+            background: rgba(255,255,255,0.78);
+            backdrop-filter: blur(10px);
+            border: 1px solid rgba(30,58,95,0.16);
+            box-shadow: 0 10px 30px rgba(15,23,42,0.14);
+          }
+          .block-container {
+            padding-bottom: 9rem !important;
+          }
+
           /* Travel summary boundary (numbered list) */
           .travel-summary-boundary {
             border-radius: 16px;
@@ -297,6 +317,7 @@ if "chat_messages" not in st.session_state:
                 "Try: `show restaurants we saved in Goa`"
             ),
             "results": None,
+            "agentic": None,
         }
     ]
 
@@ -351,6 +372,60 @@ def render_enrichment(enrichment: dict):
         except Exception:
             st.caption(f"Map coordinates: {lat}, {lng}")
 
+
+def render_map_points(map_points: list):
+    if not map_points:
+        return
+    rows = []
+    for point in map_points:
+        lat = point.get("lat")
+        lng = point.get("lng")
+        if lat is None or lng is None:
+            continue
+        try:
+            rows.append({"lat": float(lat), "lon": float(lng)})
+        except Exception:
+            continue
+    if rows:
+        st.caption("Map view")
+        st.map(pd.DataFrame(rows), zoom=4)
+
+
+def render_intent_cards(intent: str, cards: list):
+    if not cards:
+        return
+    if intent == "trip_planning":
+        st.markdown("### Itinerary")
+    elif intent == "recommendation":
+        st.markdown("### Recommendations")
+    else:
+        st.markdown("### Results")
+
+    for card in cards:
+        title = card.get("title") or "Untitled"
+        subtitle = card.get("subtitle")
+        summary = card.get("summary")
+        reason = card.get("reason")
+        st.markdown(f"**{title}**")
+        if subtitle:
+            st.caption(subtitle)
+        if summary:
+            st.markdown(summary)
+        if reason:
+            st.caption(reason)
+
+        metadata = card.get("metadata") or {}
+        places = metadata.get("places") or []
+        if places:
+            for idx, place in enumerate(places, start=1):
+                place_name = place.get("place_name") or "Unknown place"
+                location = ", ".join([x for x in [place.get("city"), place.get("country")] if x])
+                line = f"{idx}. {place_name}"
+                if location:
+                    line += f" ({location})"
+                st.markdown(line)
+        st.divider()
+
 # ---------- TAB 1: SAVE REEL ----------
 with tabs[0]:
     st.subheader("Save a new reel")
@@ -379,11 +454,14 @@ with tabs[0]:
 # ---------- TAB 2: ASK QUESTIONS ----------
 with tabs[1]:
     st.subheader("Chat with your saved reels")
-    top_k = st.slider("Results to search per question", 1, 10, 5)
 
     for message in st.session_state.chat_messages:
         with st.chat_message(message["role"]):
             st.markdown(message["content"])
+            if message["role"] == "assistant" and message.get("agentic"):
+                agentic = message["agentic"]
+                render_map_points(agentic.get("map_points", []))
+                render_intent_cards(agentic.get("intent", "search"), agentic.get("cards", []))
             if message["role"] == "assistant" and message.get("results"):
                 with st.expander("Sources", expanded=False):
                     for idx, r in enumerate(message["results"], start=1):
@@ -398,7 +476,7 @@ with tabs[1]:
     prompt = st.chat_input("Ask something about your reels...")
     if prompt:
         st.session_state.chat_messages.append(
-            {"role": "user", "content": prompt, "results": None}
+            {"role": "user", "content": prompt, "results": None, "agentic": None}
         )
         with st.chat_message("user"):
             st.markdown(prompt)
@@ -408,32 +486,24 @@ with tabs[1]:
             try:
                 with st.spinner("Thinking..."):
                     resp = requests.post(
-                        f"{API_BASE}/query",
-                        json={"query": prompt, "top_k": top_k},
+                        f"{API_BASE}/query-agentic",
+                        json={"query": prompt, "top_k": CHAT_TOP_K},
                         timeout=60,
                     )
                     resp.raise_for_status()
                     data = resp.json()
-                results = data.get("results", [])
+                intent = data.get("intent", "search")
+                cards = data.get("cards", [])
+                map_points = data.get("map_points", [])
+                results = data.get("sources", [])
+                narrative = data.get("narrative") or ""
 
                 if not results:
                     full_reply = (
                         "I could not find matching reels yet. Save a few reels first, then try again."
                     )
                 else:
-                    lines = ["Here is what I found from your saved reels:\n"]
-                    for idx, r in enumerate(results, start=1):
-                        enrichment = r.get("enrichment") or {}
-                        place = enrichment.get("place_name") or "Unknown place"
-                        city = enrichment.get("city")
-                        country = enrichment.get("country")
-                        location = ", ".join([x for x in [city, country] if x]) or "Unknown location"
-                        summary = enrichment.get("summary") or r.get("summary") or ""
-                        summary = re.sub(r"\s+", " ", summary).strip()
-                        lines.append(
-                            f"{idx}. **{place}** ({location}) - {summary}\n   Source: {r['url']}"
-                        )
-                    full_reply = "\n\n".join(lines)
+                    full_reply = f"{narrative}\n\nIntent: **{intent}**"
 
                 def typewriter_stream(text: str):
                     for token in text.split(" "):
@@ -442,8 +512,22 @@ with tabs[1]:
 
                 placeholder.write_stream(typewriter_stream(full_reply))
                 st.session_state.chat_messages.append(
-                    {"role": "assistant", "content": full_reply, "results": results}
+                    {
+                        "role": "assistant",
+                        "content": full_reply,
+                        "results": results,
+                        "agentic": {
+                            "intent": intent,
+                            "cards": cards,
+                            "map_points": map_points,
+                        },
+                    }
                 )
+
+                if map_points:
+                    render_map_points(map_points)
+                if cards:
+                    render_intent_cards(intent, cards)
 
                 if results:
                     with st.expander("Sources", expanded=False):
@@ -459,6 +543,6 @@ with tabs[1]:
                 error_text = f"I hit an error while searching your reels: {e}"
                 placeholder.markdown(error_text)
                 st.session_state.chat_messages.append(
-                    {"role": "assistant", "content": error_text, "results": None}
+                    {"role": "assistant", "content": error_text, "results": None, "agentic": None}
                 )
 
