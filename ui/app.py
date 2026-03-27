@@ -453,6 +453,53 @@ def render_intent_cards(intent: str, cards: list):
                 st.markdown(line)
         st.divider()
 
+
+def split_narrative_and_question(text: str):
+    text = (text or "").strip()
+    if not text:
+        return "", ""
+    question_match = re.search(r"([^?]*\?)\s*$", text)
+    if not question_match:
+        return text, ""
+    question = question_match.group(1).strip()
+    body = text[: question_match.start()].strip()
+    return body, question
+
+
+def render_results_boxes(results: list):
+    if not results:
+        return
+    st.markdown("#### Results")
+    for idx, r in enumerate(results, start=1):
+        enrichment = r.get("enrichment") or {}
+        place_name = enrichment.get("place_name") or "Saved reel"
+        city = enrichment.get("city")
+        country = enrichment.get("country")
+        location = ", ".join([x for x in [city, country] if x])
+        title = f"Result #{idx} - {place_name}"
+        if location:
+            title += f" ({location})"
+
+        with st.expander(title, expanded=False):
+            summary = enrichment.get("summary") or r.get("summary") or "No summary available."
+            score = r.get("score", 0.0)
+            st.markdown(
+                f"<div style='font-size:0.86rem; color:#334155;'>"
+                f"Score: {float(score):.3f}</div>",
+                unsafe_allow_html=True,
+            )
+            st.markdown(
+                f"<div style='font-size:0.88rem; line-height:1.45;'>{summary}</div>",
+                unsafe_allow_html=True,
+            )
+            url = r.get("url")
+            if url:
+                st.markdown(
+                    f"<div style='font-size:0.86rem; margin-top:6px;'>"
+                    f"<a href='{url}' target='_blank'>Open reel</a></div>",
+                    unsafe_allow_html=True,
+                )
+
 # ---------- TAB 1: SAVE REEL ----------
 with tabs[0]:
     st.subheader("Save a new reel")
@@ -484,23 +531,15 @@ with tabs[1]:
 
     for message in st.session_state.chat_messages:
         with st.chat_message(message["role"]):
-            st.markdown(message["content"])
+            body_text, question_text = split_narrative_and_question(message["content"])
+            st.markdown(body_text or message["content"])
             if message["role"] == "assistant" and message.get("agentic"):
                 agentic = message["agentic"]
                 intent = agentic.get("intent", "search")
                 if intent != "recommendation":
                     render_map_points(agentic.get("map_points", []))
-                    render_intent_cards(intent, agentic.get("cards", []))
             if message["role"] == "assistant" and message.get("results"):
-                with st.expander("Sources", expanded=False):
-                    for idx, r in enumerate(message["results"], start=1):
-                        st.markdown(f"**Result #{idx}** | score `{r['score']:.3f}`")
-                        st.markdown(f"URL: {r['url']}")
-                        if r.get("enrichment"):
-                            render_enrichment(r["enrichment"], show_map=False)
-                        st.caption(f"Reel ID: {r['reel_id']}")
-                        if idx < len(message["results"]):
-                            st.divider()
+                render_results_boxes(message["results"])
 
     prompt = st.chat_input("Ask something about your reels...")
     if prompt:
@@ -539,7 +578,8 @@ with tabs[1]:
                         yield token + " "
                         time.sleep(0.02)
 
-                placeholder.write_stream(typewriter_stream(full_reply))
+                body_text, question_text = split_narrative_and_question(full_reply)
+                placeholder.write_stream(typewriter_stream(body_text or full_reply))
                 st.session_state.chat_messages.append(
                     {
                         "role": "assistant",
@@ -555,19 +595,9 @@ with tabs[1]:
 
                 if map_points and intent != "recommendation":
                     render_map_points(map_points)
-                if cards and intent != "recommendation":
-                    render_intent_cards(intent, cards)
 
                 if results:
-                    with st.expander("Sources", expanded=False):
-                        for idx, r in enumerate(results, start=1):
-                            st.markdown(f"**Result #{idx}** | score `{r['score']:.3f}`")
-                            st.markdown(f"URL: {r['url']}")
-                            if r.get("enrichment"):
-                                render_enrichment(r["enrichment"], show_map=False)
-                            st.caption(f"Reel ID: {r['reel_id']}")
-                            if idx < len(results):
-                                st.divider()
+                    render_results_boxes(results)
             except Exception as e:
                 error_text = f"I hit an error while searching your reels: {e}"
                 placeholder.markdown(error_text)
