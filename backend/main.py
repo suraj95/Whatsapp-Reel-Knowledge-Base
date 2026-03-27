@@ -1,5 +1,6 @@
 import os
 import uuid
+import logging
 from typing import List
 
 from fastapi import FastAPI, HTTPException
@@ -18,6 +19,7 @@ from .helpers import (
     summarize_video_with_gpt4o,
 )
 from .models import (
+    AgenticQueryResponse,
     AddReelRequest,
     AddReelResponse,
     EnrichRequest,
@@ -27,8 +29,11 @@ from .models import (
     QueryResponse,
     ReelResult,
 )
+from .query_orchestrator import handle_query_agentic
 
 load_dotenv()
+logging.basicConfig(level=logging.INFO)
+logger = logging.getLogger(__name__)
 
 OPENAI_API_KEY = os.getenv("OPENAI_API_KEY")
 if not OPENAI_API_KEY:
@@ -180,6 +185,25 @@ def query_reels(payload: QueryRequest):
         )
 
     return QueryResponse(results=results)
+
+
+@app.post("/query-agentic", response_model=AgenticQueryResponse)
+def query_reels_agentic(payload: QueryRequest):
+    response = handle_query_agentic(
+        query=payload.query,
+        top_k=payload.top_k,
+        client=client,
+        index=index,
+    )
+    logger.info(
+        "query_agentic intent=%s route=%s confidence=%.2f results=%d map_points=%d",
+        response.intent.value,
+        response.meta.debug_route,
+        response.meta.confidence,
+        response.meta.result_count,
+        response.meta.map_points_count,
+    )
+    return response
 
 
 @app.post("/enrich", response_model=EnrichResponse)
