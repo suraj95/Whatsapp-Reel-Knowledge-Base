@@ -143,6 +143,54 @@ Open in browser:
 
 ---
 
+## Backfill Missing Map Coordinates
+
+If older Pinecone records do not have coordinates, they may not show up on the map.
+Run this migration to backfill missing `enrichment_lat` / `enrichment_lng` (and legacy `lat` / `lon` when present).
+
+Prerequisites:
+
+- `PINECONE_API_KEY` set in `.env`
+- `LOCATIONIQ_API_KEY` set in `.env` (used for geocoding by place/city/country)
+- Optional but recommended: `TAVILY_API_KEY` set in `.env` to recover missing place context from weak/empty metadata
+
+Dry run first:
+
+```bash
+python scripts/migrate_backfill_coords.py --dry-run
+```
+
+Run migration:
+
+```bash
+python scripts/migrate_backfill_coords.py
+```
+
+When place fields are missing, the script now:
+
+1. Tries to recover context from stored reel metadata (`enrichment_json`, `doc_text`, summary)  
+2. For `instagram.com` / `instagr.am` reel URLs, fetches public metadata with **yt-dlp** (same as the backend: title, description, hashtags, location tag) and geocodes those hints (state-level or city-level is fine)  
+3. Falls back to Tavily search (if `TAVILY_API_KEY` is set)  
+4. Geocodes recovered candidates via LocationIQ  
+
+Useful options:
+
+```bash
+# Process only first 50 records safely
+python scripts/migrate_backfill_coords.py --max-records 50
+
+# Use a specific namespace
+python scripts/migrate_backfill_coords.py --namespace my-namespace
+
+# Skip Instagram metadata fetch (no yt-dlp / IG requests)
+python scripts/migrate_backfill_coords.py --no-ig-fetch
+
+# Slower delay between IG metadata calls (rate limits)
+python scripts/migrate_backfill_coords.py --ig-sleep-seconds 2
+```
+
+---
+
 ## Usage 🧭
 
 ### Save a Reel
