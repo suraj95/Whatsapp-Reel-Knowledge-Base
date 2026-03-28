@@ -2,6 +2,7 @@ import requests
 import streamlit as st
 import pandas as pd
 import base64
+import json
 from pathlib import Path
 import re
 import time
@@ -321,6 +322,49 @@ if "chat_messages" not in st.session_state:
             "agentic": None,
         }
     ]
+if "map_already_shown" not in st.session_state:
+    st.session_state.map_already_shown = False
+
+
+def narrative_json_to_markdown(text: str) -> str:
+    """If the model returned a JSON object as narrative, render as readable Markdown."""
+    raw = (text or "").strip()
+    if not raw:
+        return ""
+    candidate = raw
+    if candidate.startswith("```"):
+        candidate = re.sub(r"^```(?:json)?\s*", "", candidate, flags=re.IGNORECASE)
+        candidate = re.sub(r"\s*```$", "", candidate)
+    if not (candidate.startswith("{") and candidate.endswith("}")):
+        return raw
+    try:
+        data = json.loads(candidate)
+    except Exception:
+        return raw
+    if not isinstance(data, dict):
+        return raw
+    parts = []
+    for k, v in data.items():
+        title = str(k).replace("_", " ").strip().title()
+        if isinstance(v, dict):
+            parts.append(f"### {title}")
+            for sk, sv in v.items():
+                parts.append(f"- **{sk}:** {sv}")
+        elif isinstance(v, list):
+            parts.append(f"### {title}")
+            for item in v:
+                parts.append(f"- {item}")
+        else:
+            parts.append(f"### {title}\n\n{v}")
+    return "\n\n".join(parts)
+
+
+def _narrative_looks_like_json_object(text: str) -> bool:
+    t = (text or "").strip()
+    if t.startswith("```"):
+        t = re.sub(r"^```(?:json)?\s*", "", t, flags=re.IGNORECASE)
+        t = re.sub(r"\s*```$", "", t)
+    return len(t) > 2 and t.startswith("{") and t.endswith("}")
 
 
 def render_enrichment(enrichment: dict, show_map: bool = True):
@@ -374,29 +418,43 @@ def render_enrichment(enrichment: dict, show_map: bool = True):
             st.caption(f"Map coordinates: {lat}, {lng}")
 
 
-def render_map_points(map_points: list):
+def render_map_points(map_points: list, *, intent: str = "search"):
     if not map_points:
         return
-    top = map_points[0]
-    lat = top.get("lat")
-    lng = top.get("lng")
-    if lat is None or lng is None:
+    # Second response is often trip_planning with more pins; fingerprint matching fails.
+    # Skip map entirely on trip follow-ups once any map has been shown this session.
+    if intent == "trip_planning" and st.session_state.get("map_already_shown"):
         return
-    try:
-        lat_f = float(lat)
-        lng_f = float(lng)
-    except Exception:
+    rows = []
+    for p in map_points:
+        lat, lng = p.get("lat"), p.get("lng")
+        if lat is None or lng is None:
+            continue
+        try:
+            lat_f = float(lat)
+            lng_f = float(lng)
+        except Exception:
+            continue
+        label = p.get("city") or p.get("place_name") or "Place"
+        rows.append({"lat": lat_f, "lng": lng_f, "label": label})
+    if not rows:
         return
 
-    label = top.get("city") or top.get("place_name") or "Top match"
-    df = pd.DataFrame([{"lat": lat_f, "lng": lng_f, "label": label}])
+    df = pd.DataFrame(rows)
+    center_lat = float(df["lat"].mean())
+    center_lng = float(df["lng"].mean())
+    zoom = 10 if len(rows) == 1 else 7
 
     scatter_layer = pdk.Layer(
         "ScatterplotLayer",
         data=df,
         get_position="[lng, lat]",
-        get_radius=120,
-        get_fill_color=[220, 38, 38, 200],
+        get_radius=12,
+        radius_units="pixels",
+        stroked=True,
+        get_line_width=2,
+        get_line_color=[255, 255, 255, 240],
+        get_fill_color=[220, 38, 38, 230],
         pickable=True,
     )
     text_layer = pdk.Layer(
@@ -404,18 +462,20 @@ def render_map_points(map_points: list):
         data=df,
         get_position="[lng, lat]",
         get_text="label",
-        get_size=16,
-        get_color=[15, 23, 42, 220],
+        get_size=18,
+        get_color=[255, 240, 80, 255],
         get_alignment_baseline="'top'",
         get_pixel_offset=[0, 14],
     )
     deck = pdk.Deck(
         layers=[scatter_layer, text_layer],
-        initial_view_state=pdk.ViewState(latitude=lat_f, longitude=lng_f, zoom=10, pitch=0),
+        initial_view_state=pdk.ViewState(latitude=center_lat, longitude=center_lng, zoom=zoom, pitch=0),
         tooltip={"text": "{label}"},
     )
-    st.caption("Top location")
+    cap = "Locations on your results" if len(rows) > 1 else "Top location"
+    st.caption(cap)
     st.pydeck_chart(deck, use_container_width=True)
+    st.session_state.map_already_shown = True
 
 
 def render_intent_cards(intent: str, cards: list):
@@ -451,6 +511,58 @@ def render_intent_cards(intent: str, cards: list):
                 if location:
                     line += f" ({location})"
                 st.markdown(line)
+        forecast = metadata.get("forecast")
+        if forecast:
+            st.caption("Forecast (daily)")
+            if isinstance(forecast, list) and forecast:
+                lines = ["| Date | High °C | Low °C | Rain % |", "| --- | --- | --- | --- |"]
+                for row in forecast[:8]:
+                    if not isinstance(row, dict):
+                        continue
+                    lines.append(
+                        "| {date} | {hi} | {lo} | {rain} |".format(
+                            date=row.get("date", "—"),
+                            hi=row.get("max_c", "—"),
+                            lo=row.get("min_c", "—"),
+                            rain=row.get("precip_pct", "—"),
+                        )
+                    )
+                st.markdown("\n".join(lines))
+            else:
+                st.json(forecast)
+        offers = metadata.get("offers")
+        if offers:
+            st.caption("Sample flight offers")
+            if isinstance(offers, list):
+                for i, off in enumerate(offers[:5], start=1):
+                    if not isinstance(off, dict):
+                        continue
+                    price = off.get("price_total")
+                    cur = off.get("currency", "")
+                    segs = off.get("segments") or []
+                    seg_bits = []
+                    for s in segs[:2]:
+                        if isinstance(s, dict):
+                            seg_bits.append(
+                                f"{s.get('from', '?')} → {s.get('to', '?')} ({s.get('flight', '')})"
+                            )
+                    st.markdown(
+                        f"{i}. **{price} {cur}**  \n   {', '.join(seg_bits) if seg_bits else 'See offer details'}"
+                    )
+            else:
+                st.json(offers)
+        stops = metadata.get("stops")
+        if stops:
+            for s in stops[:8]:
+                nm = s.get("name") or "Stop"
+                k = s.get("kind") or ""
+                st.markdown(f"- {nm} ({k})")
+        pois = metadata.get("pois")
+        if pois:
+            for poi in pois[:8]:
+                nm = poi.get("name") or "Place"
+                k = poi.get("kind") or ""
+                st.markdown(f"- {nm} ({k})")
         st.divider()
 
 
@@ -531,18 +643,38 @@ with tabs[1]:
 
     for message in st.session_state.chat_messages:
         with st.chat_message(message["role"]):
-            body_text, question_text = split_narrative_and_question(message["content"])
-            st.markdown(body_text or message["content"])
-            if message["role"] == "assistant" and message.get("agentic"):
+            if message["role"] == "user":
+                st.markdown(message["content"])
+                continue
+
+            content = message.get("content") or ""
+            body_text, question_text = split_narrative_and_question(content)
+            base = body_text or content
+            if _narrative_looks_like_json_object(base):
+                st.markdown(narrative_json_to_markdown(base))
+            else:
+                st.markdown(base)
+            if question_text:
+                st.markdown(question_text)
+
+            if message.get("agentic"):
                 agentic = message["agentic"]
                 intent = agentic.get("intent", "search")
-                if intent != "recommendation":
-                    render_map_points(agentic.get("map_points", []))
-            if message["role"] == "assistant" and message.get("results"):
+                cards = agentic.get("cards") or []
+                if cards:
+                    render_intent_cards(intent, cards)
+                if intent in ("search", "recommendation"):
+                    st.session_state.map_already_shown = False
+                render_map_points(agentic.get("map_points", []), intent=intent)
+            if message.get("results"):
                 render_results_boxes(message["results"])
 
     prompt = st.chat_input("Ask something about your reels...")
     if prompt:
+        conversation_history = [
+            {"role": m["role"], "content": m["content"]}
+            for m in st.session_state.chat_messages
+        ]
         st.session_state.chat_messages.append(
             {"role": "user", "content": prompt, "results": None, "agentic": None}
         )
@@ -555,7 +687,11 @@ with tabs[1]:
                 with st.spinner("Thinking..."):
                     resp = requests.post(
                         f"{API_BASE}/query-agentic",
-                        json={"query": prompt, "top_k": CHAT_TOP_K},
+                        json={
+                            "query": prompt,
+                            "top_k": CHAT_TOP_K,
+                            "conversation_history": conversation_history,
+                        },
                         timeout=60,
                     )
                     resp.raise_for_status()
@@ -567,9 +703,15 @@ with tabs[1]:
                 narrative = data.get("narrative") or ""
 
                 if not results:
-                    full_reply = (
-                        "I could not find matching reels yet. Save a few reels first, then try again."
-                    )
+                    if intent == "trip_planning":
+                        full_reply = narrative or (
+                            "I couldn't pull saved reels for this destination yet. "
+                            "Save a few reels or name a place more clearly, and try again."
+                        )
+                    else:
+                        full_reply = (
+                            "I could not find matching reels yet. Save a few reels first, then try again."
+                        )
                 else:
                     full_reply = narrative
 
@@ -578,8 +720,11 @@ with tabs[1]:
                         yield token + " "
                         time.sleep(0.02)
 
-                body_text, question_text = split_narrative_and_question(full_reply)
-                placeholder.write_stream(typewriter_stream(body_text or full_reply))
+                if _narrative_looks_like_json_object(full_reply):
+                    placeholder.markdown(narrative_json_to_markdown(full_reply))
+                else:
+                    body_text, question_text = split_narrative_and_question(full_reply)
+                    placeholder.write_stream(typewriter_stream(body_text or full_reply))
                 st.session_state.chat_messages.append(
                     {
                         "role": "assistant",
@@ -593,8 +738,12 @@ with tabs[1]:
                     }
                 )
 
-                if map_points and intent != "recommendation":
-                    render_map_points(map_points)
+                if cards:
+                    render_intent_cards(intent, cards)
+                if intent in ("search", "recommendation"):
+                    st.session_state.map_already_shown = False
+                if map_points:
+                    render_map_points(map_points, intent=intent)
 
                 if results:
                     render_results_boxes(results)
