@@ -7,16 +7,43 @@ from openai import OpenAI
 from .models import IntentDetectionResult, IntentEntities, QueryIntent
 
 
-TRIP_KEYWORDS = (
-    "plan",
-    "itinerary",
-    "day 1",
+# Multi-word phrases first (checked before single-token matches) to avoid
+# recommendation keywords winning on e.g. "top ways to reach Goa".
+TRIP_PHRASES = (
+    "how do i reach",
+    "how to reach",
+    "ways to reach",
+    "how do i get",
+    "how to get",
+    "get there",
+    "reach there",
+    "directions to",
+    "directions from",
+    "route to",
+    "plan a trip",
+    "plan my trip",
+    "plan our trip",
+    "planning a trip",
+    "planning my trip",
+    "planning our trip",
+    "planning to",
+    "help me plan",
+    "want to plan",
+    "need to plan",
+    "schedule a trip",
+    "organize a trip",
+    "book a trip",
+    "trip around",
+    "around it",
+    "weekend plan",
     "day-wise",
-    "days",
-    "trip",
+    "day 1",
     "2 day",
     "3 day",
-    "weekend plan",
+)
+TRIP_KEYWORDS = (
+    "itinerary",
+    "days",
 )
 RECOMMENDATION_KEYWORDS = (
     "recommend",
@@ -49,12 +76,35 @@ def _extract_destination(query: str) -> Optional[str]:
     return None
 
 
-def _rule_based_intent(query: str) -> IntentDetectionResult:
+def _has_trip_planning_signal(lowered: str) -> bool:
+    if any(phrase in lowered for phrase in TRIP_PHRASES):
+        return True
+    if any(keyword in lowered for keyword in TRIP_KEYWORDS):
+        return True
+    # Word-boundary match: include "planning" (not matched by \bplan\b alone).
+    if re.search(r"\b(plan|planning|trip|itinerary)\b", lowered):
+        return True
+    if re.search(r"\b\d+\s*day\b", lowered):
+        return True
+    return False
+
+
+def _merge_conversation_for_intent(query: str, conversation_context: Optional[str]) -> str:
+    q = (query or "").strip()
+    ctx = (conversation_context or "").strip()
+    if not ctx:
+        return q
+    return f"{ctx}\n{q}".strip()
+
+
+def _rule_based_intent(query: str, conversation_context: Optional[str] = None) -> IntentDetectionResult:
     lowered = (query or "").strip().lower()
     destination = _extract_destination(lowered)
+    if not destination and conversation_context:
+        destination = _extract_destination(conversation_context.lower())
     entities = IntentEntities(destination=destination)
 
-    if any(keyword in lowered for keyword in TRIP_KEYWORDS):
+    if _has_trip_planning_signal(lowered):
         return IntentDetectionResult(
             intent=QueryIntent.trip_planning,
             confidence=0.92,
@@ -94,7 +144,20 @@ def _safe_json_parse(content: str) -> dict:
     return {}
 
 
-def _llm_intent(query: str, client: OpenAI) -> IntentDetectionResult:
+def _llm_intent(
+    query: str,
+    client: OpenAI,
+    conversation_context: Optional[str] = None,
+) -> IntentDetectionResult:
+    user_block = query.strip()
+    if conversation_context:
+        user_block = (
+            "Classify intent using only the latest user message.\n"
+            "Use conversation only to infer missing entities (for example, resolve 'there' to a prior destination).\n\n"
+            "Conversation so far (oldest first):\n"
+            f"{conversation_context.strip()}\n\n"
+            f"Latest message:\n{query.strip()}"
+        )
     response = client.chat.completions.create(
         model="gpt-4o-mini",
         temperature=0.0,
@@ -107,10 +170,17 @@ def _llm_intent(query: str, client: OpenAI) -> IntentDetectionResult:
                     "Return strict JSON with keys: intent, confidence, entities.\n"
                     "intent must be one of: trip_planning, search, recommendation, unknown.\n"
                     "confidence must be 0..1.\n"
-                    "entities object keys: destination, dates, budget, trip_length, food_pref."
+                    "entities object keys: destination, origin, departure_date, return_date, dates, budget, trip_length, food_pref.\n"
+                    "Classify intent from the latest message only; do not let earlier conversation force trip_planning.\n"
+                    "Use trip_planning when the user asks how to get somewhere, directions, routes, transportation, "
+                    "multi-day itineraries, planning travel around a place, or follow-ups like reaching a prior result.\n"
+                    "Infer destination from earlier turns when the latest message is vague (e.g. 'plan a trip there').\n"
+                    "Use recommendation for open-ended best/top/must-try lists of places without routing or day-by-day planning.\n"
+                    "Use search for finding or listing saved reels by topic or location.\n"
+                    "If latest message is only a location/topic name (e.g. 'Kasol', 'Igatpuri cafes') without route/planning terms, classify as search."
                 ),
             },
-            {"role": "user", "content": query},
+            {"role": "user", "content": user_block},
         ],
     )
     content = response.choices[0].message.content or "{}"
@@ -131,6 +201,9 @@ def _llm_intent(query: str, client: OpenAI) -> IntentDetectionResult:
         raw_entities = {}
     entities = IntentEntities(
         destination=raw_entities.get("destination"),
+        origin=raw_entities.get("origin"),
+        departure_date=raw_entities.get("departure_date"),
+        return_date=raw_entities.get("return_date"),
         dates=raw_entities.get("dates"),
         budget=raw_entities.get("budget"),
         trip_length=raw_entities.get("trip_length"),
@@ -151,22 +224,35 @@ def _llm_intent(query: str, client: OpenAI) -> IntentDetectionResult:
     )
 
 
-def detect_intent(query: str, client: OpenAI) -> IntentDetectionResult:
+def detect_intent(
+    query: str,
+    client: OpenAI,
+    conversation_context: Optional[str] = None,
+) -> IntentDetectionResult:
     """
     Rule-first intent detection with LLM fallback for ambiguous cases.
     """
-    rule_result = _rule_based_intent(query)
+    rule_result = _rule_based_intent(query, conversation_context=conversation_context)
 
     # Rules are enough for strongly-signaled queries.
     if rule_result.confidence >= 0.86:
         return rule_result
 
     try:
-        llm_result = _llm_intent(query, client)
-        if llm_result.confidence >= rule_result.confidence:
-            return llm_result
+        llm_result = _llm_intent(query, client, conversation_context=conversation_context)
     except Exception:
-        # Fallback to deterministic behavior on any model/API failure.
-        pass
+        return rule_result
+
+    # Default search (0.75) often loses to a correct but modest-confidence LLM trip
+    # because 0.62 < 0.75. Prefer trip_planning when the model is reasonably sure.
+    if (
+        llm_result.intent == QueryIntent.trip_planning
+        and llm_result.confidence >= 0.52
+        and rule_result.intent == QueryIntent.search
+    ):
+        return llm_result
+
+    if llm_result.confidence >= rule_result.confidence:
+        return llm_result
 
     return rule_result

@@ -194,5 +194,29 @@ class QueryOrchestratorTests(unittest.TestCase):
         self.assertEqual(res.narrative, "Clean answer")
 
 
+    @patch("backend.query_orchestrator.detect_intent")
+    @patch("backend.query_orchestrator.embed_text")
+    @patch("backend.query_orchestrator.handle_trip_planning")
+    @patch("backend.query_orchestrator.format_conversational_query_response")
+    def test_trip_skip_narrative(self, mock_formatter, mock_handler, mock_embed, mock_detect):
+        mock_detect.return_value = type(
+            "IntentResult", (), {"intent": QueryIntent.trip_planning, "confidence": 0.9}
+        )()
+        mock_embed.return_value = [0.1, 0.2]
+        mock_formatter.return_value = "SHOULD_NOT_APPLY"
+        res = _response(
+            QueryIntent.trip_planning,
+            "trip_planner_graph",
+            sources=[],
+        )
+        res.meta.skip_conversational_rewrite = True
+        res.narrative = "Planner narrative"
+        mock_handler.return_value = res
+
+        out = handle_query_agentic("query", 5, client=object(), index=object())
+        self.assertEqual(out.narrative, "Planner narrative")
+        mock_formatter.assert_not_called()
+
+
 if __name__ == "__main__":
     unittest.main()

@@ -1,5 +1,5 @@
 import logging
-from typing import Any
+from typing import Any, Dict, List, Optional
 
 from openai import OpenAI
 
@@ -13,6 +13,26 @@ from .models import AgenticQueryResponse, QueryIntent
 logger = logging.getLogger(__name__)
 
 MIN_RESULT_SCORE = 0.35
+# Cap trip planner + intent context string length (conversation + latest query).
+TRIP_QUERY_MAX_CHARS = 8000
+
+
+def _format_conversation_context(
+    conversation_history: Optional[List[Dict[str, Any]]],
+    max_chars: int = 4000,
+) -> str:
+    if not conversation_history:
+        return ""
+    chunks = []
+    for m in conversation_history[-16:]:
+        role = (m.get("role") or "").strip()
+        content = (m.get("content") or "").strip()
+        if content:
+            chunks.append(f"{role}: {content}")
+    text = "\n".join(chunks)
+    if len(text) > max_chars:
+        text = text[-max_chars:]
+    return text
 
 
 def _build_place_payload(response: AgenticQueryResponse):
@@ -64,10 +84,14 @@ def _post_process_response(response: AgenticQueryResponse, query: str, client: O
     response.meta.applied_filters["dropped_low_confidence"] = max(0, len(all_sources) - len(kept_sources))
 
     if not response.sources:
-        response.narrative = (
-            "I found only low-confidence matches this time. Try rephrasing or save more reels. "
-            "Do you want me to suggest a better query to find places faster?"
-        )
+        if not response.meta.skip_conversational_rewrite:
+            response.narrative = (
+                "I found only low-confidence matches this time. Try rephrasing or save more reels. "
+                "Do you want me to suggest a better query to find places faster?"
+            )
+        return response
+
+    if response.meta.skip_conversational_rewrite:
         return response
 
     place_payload = _build_place_payload(response)
@@ -88,9 +112,26 @@ def _post_process_response(response: AgenticQueryResponse, query: str, client: O
     return response
 
 
-def handle_query_agentic(query: str, top_k: int, client: OpenAI, index: Any) -> AgenticQueryResponse:
-    intent_result = detect_intent(query=query, client=client)
-    query_embedding = embed_text(client, query)
+def handle_query_agentic(
+    query: str,
+    top_k: int,
+    client: OpenAI,
+    index: Any,
+    conversation_history: Optional[List[Dict[str, Any]]] = None,
+) -> AgenticQueryResponse:
+    context = _format_conversation_context(conversation_history)
+    intent_result = detect_intent(
+        query=query,
+        client=client,
+        conversation_context=context or None,
+    )
+    # Embed the current user message only so Pinecone matches stay stable and do not
+    # balloon when prior turns mention many places.
+    query_embedding = embed_text(client, query.strip())
+
+    trip_query = query.strip()
+    if context:
+        trip_query = f"{context}\n{query}".strip()[-TRIP_QUERY_MAX_CHARS:]
 
     if intent_result.intent == QueryIntent.trip_planning:
         response = handle_trip_planning(
@@ -98,7 +139,8 @@ def handle_query_agentic(query: str, top_k: int, client: OpenAI, index: Any) -> 
             query_embedding=query_embedding,
             top_k=top_k,
             intent_result=intent_result,
-            query=query,
+            query=trip_query,
+            client=client,
         )
     elif intent_result.intent == QueryIntent.recommendation:
         response = handle_recommendation(

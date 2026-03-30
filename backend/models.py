@@ -33,6 +33,8 @@ class AddReelResponse(BaseModel):
 class QueryRequest(BaseModel):
     query: str
     top_k: int = 5
+    # Prior turns (oldest first): [{"role": "user"|"assistant", "content": "..."}]
+    conversation_history: Optional[List[Dict[str, Any]]] = None
 
 
 class ReelResult(BaseModel):
@@ -65,6 +67,9 @@ class QueryIntent(str, Enum):
 
 class IntentEntities(BaseModel):
     destination: Optional[str] = None
+    origin: Optional[str] = None
+    departure_date: Optional[str] = None
+    return_date: Optional[str] = None
     dates: Optional[str] = None
     budget: Optional[str] = None
     trip_length: Optional[str] = None
@@ -113,6 +118,7 @@ class QueryMeta(BaseModel):
     geocoded_on_the_fly: int = 0
     result_count: int = 0
     map_points_count: int = 0
+    skip_conversational_rewrite: bool = False
 
 
 class AgenticQueryResponse(BaseModel):

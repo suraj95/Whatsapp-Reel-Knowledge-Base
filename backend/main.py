@@ -194,6 +194,7 @@ def query_reels_agentic(payload: QueryRequest):
         top_k=payload.top_k,
         client=client,
         index=index,
+        conversation_history=payload.conversation_history,
     )
     logger.info(
         "query_agentic intent=%s route=%s confidence=%.2f results=%d map_points=%d",

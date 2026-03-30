@@ -5,7 +5,6 @@ import os
 import re
 import subprocess
 import tempfile
-from functools import lru_cache
 from typing import Any, Dict, List, Optional, Tuple
 from urllib.parse import parse_qsl, urlsplit, urlunsplit, urlencode
 
@@ -343,105 +342,6 @@ def embed_text(client: OpenAI, text: str) -> List[float]:
     return resp.data[0].embedding
 
 
-@lru_cache(maxsize=1)
-def _get_enrichment_executor():
-    try:
-        from langchain.agents import create_agent
-        from langchain_community.tools.tavily_search import TavilySearchResults
-        from langchain_core.tools import tool
-    except Exception as e:
-        raise RuntimeError(
-            "Missing enrichment dependencies. Install langchain and "
-            "langchain-community."
-        ) from e
-
-    @tool
-    def search_place_details(query: str) -> dict:
-        """Search for a place and return key details."""
-        maps_key = os.getenv("LOCATIONIQ_API_KEY")
-        if not maps_key:
-            return {"error": "LOCATIONIQ_API_KEY is not set"}
-        try:
-            resp = requests.get(
-                "https://us1.locationiq.com/v1/search.php",
-                params={
-                    "key": maps_key,
-                    "q": query,
-                    "format": "json",
-                    "limit": 1,
-                    "addressdetails": 1,
-                },
-                timeout=10,
-            )
-            resp.raise_for_status()
-            results = resp.json()
-            if isinstance(results, list) and results:
-                top = results[0]
-                address = top.get("address", {})
-                city = (
-                    address.get("city")
-                    or address.get("town")
-                    or address.get("village")
-                    or address.get("state_district")
-                )
-                return {
-                    "name": top.get("display_name", "").split(",")[0].strip() or query,
-                    "formatted_address": top.get("display_name"),
-                    "rating": None,  # LocationIQ geocoding does not return ratings.
-                    "geometry": {
-                        "location": {
-                            "lat": top.get("lat"),
-                            "lng": top.get("lon"),
-                        }
-                    },
-                    "city": city,
-                    "country": address.get("country"),
-                }
-            return {"error": "Place not found"}
-        except Exception as ex:
-            return {"error": f"Place lookup failed: {ex}"}
-
-    tools = [
-        TavilySearchResults(max_results=2),
-        search_place_details,
-    ]
-
-    system_prompt = """You are an enrichment agent for a travel/food reel database.
-Given a raw vision summary of an Instagram reel, extract structured metadata.
-
-If the summary mentions a specific place or restaurant:
-1) Use search_place_details to get coordinates and rating
-2) Use TavilySearchResults if the place name is unclear
-
-You may also receive additional reel metadata (TITLE/DESCRIPTION/HASHTAGS/LOCATION_TAG)
-that often contains the correct place even when the vision summary is incomplete.
-
-Return ONLY valid JSON in this exact schema:
-{
-  "place_name": string|null,
-  "city": string|null,
-  "country": string|null,
-  "lat": number|null,
-  "lng": number|null,
-  "rating": number|null,
-  "category": "restaurant"|"beach"|"hotel"|"activity"|"street_food"|"cafe"|"bar",
-  "cuisine": string|null,
-  "price_range": "budget"|"mid"|"luxury",
-  "summary": string,
-  "tags": string[]
-}
-
-Rules:
-- tags should contain 5-8 concise, lowercase tags.
-- summary should be a cleaned up version of the input.
-- if unknown, use null for optional fields."""
-
-    return create_agent(
-        model="openai:gpt-4o",
-        tools=tools,
-        system_prompt=system_prompt,
-    )
-
 
 def _normalize_enrichment(payload: Dict, vision_summary: str) -> Dict:
     category = payload.get("category") or "activity"
@@ -554,44 +454,14 @@ async def enrich_reel_summary(
     """
     Enrich a raw visual summary into structured travel/food metadata.
     """
-    executor = _get_enrichment_executor()
-    metadata_text = ""
-    if isinstance(reel_metadata, dict):
-        metadata_text = reel_metadata.get("metadata_text") or ""
+    from backend.graphs.enrichment_graph import run_enrichment_graph
 
-    # Optional: include reel URL for better grounding.
-    reel_url_line = f"Reel URL: {reel_url}" if reel_url else ""
-
-    result = await executor.ainvoke(
-        {
-            "messages": [
-                {
-                    "role": "user",
-                    "content": (
-                        f"Vision summary: {vision_summary}\n"
-                        f"{reel_url_line}\n\n"
-                        f"Additional reel metadata (description/hashtags/location tags):\n{metadata_text}"
-                    ),
-                }
-            ]
-        }
+    result = await run_enrichment_graph(
+        vision_summary,
+        reel_url=reel_url,
+        reel_metadata=reel_metadata,
     )
-    raw_output = "{}"
-    messages = result.get("messages", [])
-    if messages:
-        last_message = messages[-1]
-        content = getattr(last_message, "content", "")
-        if isinstance(content, str):
-            raw_output = content
-        elif isinstance(content, list):
-            text_parts = []
-            for item in content:
-                if isinstance(item, dict):
-                    text = item.get("text")
-                    if text:
-                        text_parts.append(str(text))
-            if text_parts:
-                raw_output = "\n".join(text_parts)
+    raw_output = result.get("raw_output") or "{}"
     return _parse_enrichment_output(raw_output, vision_summary)
 
 
