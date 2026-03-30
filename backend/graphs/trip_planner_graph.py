@@ -276,6 +276,24 @@ async def node_compose(state: TripPlannerState, config: RunnableConfig) -> Dict[
     transit_stops = state.get("transit_stops") or []
     ground_km = state.get("ground_km")
     dest_label = state.get("destination_label") or ""
+    day_buckets = state.get("day_buckets") or {}
+
+    reel_place_refs: List[Dict[str, Any]] = []
+    reel_seq = 1
+    for day in range(1, days + 1):
+        for source in day_buckets.get(day) or []:
+            enrichment = source.enrichment
+            reel_place_refs.append(
+                {
+                    "ref": f"P{reel_seq}",
+                    "day": day,
+                    "place": enrichment.place_name if enrichment else None,
+                    "city": enrichment.city if enrichment else None,
+                    "country": enrichment.country if enrichment else None,
+                    "source_url": source.url,
+                }
+            )
+            reel_seq += 1
 
     api_payload = {
         "destination": dest_label,
@@ -284,6 +302,12 @@ async def node_compose(state: TripPlannerState, config: RunnableConfig) -> Dict[
         "flight_options": flight_summaries,
         "transit_stops_near_destination": transit_stops[:12],
         "road_distance_km_ors": ground_km,
+        "transport_data_sources": {
+            "transit_stops": "OpenStreetMap Overpass railway/bus stops near destination",
+            "road_distance": "OpenRouteService driving distance between origin and destination",
+            "flight_options": "Amadeus flight offers (when available)",
+        },
+        "saved_reel_place_refs": reel_place_refs[:20],
     }
 
     narrative = ""
@@ -300,7 +324,9 @@ async def node_compose(state: TripPlannerState, config: RunnableConfig) -> Dict[
                             "Output plain Markdown prose only (headings, bullets, bold). "
                             "Never output raw JSON, code fences, or key-value dumps as the answer. "
                             "Do not invent specific prices, flight numbers, or schedules not in the JSON. "
-                            "Mention that train/bus times require local booking apps. "
+                            "In Getting there, explicitly use transport integrations present in JSON: Overpass transit stops, ORS road distance, and Amadeus flights when available. "
+                            "Do not give generic 'use apps' advice by itself; include concrete stations/stops and distance context from JSON first, then mention app booking only for live schedules. "
+                            "In Your saved spots, refer to each spot with its ref ID (P1/P2/...) and city so it is unambiguous which place is which. "
                             "Tie in saved reels when reel places appear in the context. "
                             "Use short sections: Overview, Weather, Getting there, Around the destination, Your saved spots. "
                             "End with one short follow-up question."
@@ -311,8 +337,7 @@ async def node_compose(state: TripPlannerState, config: RunnableConfig) -> Dict[
                         "content": (
                             f"User query: {query}\n"
                             f"Trip days: {days}\n"
-                            f"Saved reel places (from vector DB): "
-                            f"{json.dumps([{'place': s.enrichment.place_name if s.enrichment else None, 'city': s.enrichment.city if s.enrichment else None} for s in selected[:10]], ensure_ascii=True)}\n"
+                            f"Saved reel places (from vector DB, labeled): {json.dumps(reel_place_refs[:20], ensure_ascii=True)}\n"
                             f"API context JSON: {json.dumps(api_payload, default=str, ensure_ascii=True)[:12000]}"
                         ),
                     },

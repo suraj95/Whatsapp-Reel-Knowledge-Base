@@ -98,9 +98,10 @@ def _merge_conversation_for_intent(query: str, conversation_context: Optional[st
 
 
 def _rule_based_intent(query: str, conversation_context: Optional[str] = None) -> IntentDetectionResult:
-    combined = _merge_conversation_for_intent(query, conversation_context)
-    lowered = combined.lower()
+    lowered = (query or "").strip().lower()
     destination = _extract_destination(lowered)
+    if not destination and conversation_context:
+        destination = _extract_destination(conversation_context.lower())
     entities = IntentEntities(destination=destination)
 
     if _has_trip_planning_signal(lowered):
@@ -151,6 +152,8 @@ def _llm_intent(
     user_block = query.strip()
     if conversation_context:
         user_block = (
+            "Classify intent using only the latest user message.\n"
+            "Use conversation only to infer missing entities (for example, resolve 'there' to a prior destination).\n\n"
             "Conversation so far (oldest first):\n"
             f"{conversation_context.strip()}\n\n"
             f"Latest message:\n{query.strip()}"
@@ -168,11 +171,13 @@ def _llm_intent(
                     "intent must be one of: trip_planning, search, recommendation, unknown.\n"
                     "confidence must be 0..1.\n"
                     "entities object keys: destination, origin, departure_date, return_date, dates, budget, trip_length, food_pref.\n"
+                    "Classify intent from the latest message only; do not let earlier conversation force trip_planning.\n"
                     "Use trip_planning when the user asks how to get somewhere, directions, routes, transportation, "
                     "multi-day itineraries, planning travel around a place, or follow-ups like reaching a prior result.\n"
                     "Infer destination from earlier turns when the latest message is vague (e.g. 'plan a trip there').\n"
                     "Use recommendation for open-ended best/top/must-try lists of places without routing or day-by-day planning.\n"
-                    "Use search for finding or listing saved reels by topic or location."
+                    "Use search for finding or listing saved reels by topic or location.\n"
+                    "If latest message is only a location/topic name (e.g. 'Kasol', 'Igatpuri cafes') without route/planning terms, classify as search."
                 ),
             },
             {"role": "user", "content": user_block},
