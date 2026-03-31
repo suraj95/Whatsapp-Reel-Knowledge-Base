@@ -113,6 +113,9 @@ Create `.env` file:
 ```bash
 OPENAI_API_KEY=sk-...
 PINECONE_API_KEY=...
+REDIS_URL=redis://localhost:6379/0
+CELERY_BROKER_URL=redis://localhost:6379/0
+CELERY_RESULT_BACKEND=redis://localhost:6379/0
 ```
 
 ⚠️ Make sure `.env` is not committed to source control.
@@ -128,6 +131,43 @@ uvicorn backend.main:app --reload --port 8000
 API docs:
 
 `http://localhost:8000/docs`
+
+---
+
+## Run Backend + Celery (for async ingestion)
+
+`POST /reels` now enqueues ingestion work in Celery.  
+FastAPI, Celery worker, and Redis run as separate processes.
+
+Start Redis (if not already running):
+
+```bash
+redis-server
+```
+
+Start API:
+
+```bash
+uvicorn backend.main:app --reload --port 8000
+```
+
+Start Celery worker (new terminal):
+
+```bash
+celery -A backend.celery_app:celery_app worker --loglevel=info
+```
+
+Start Celery beat only if you need scheduled jobs (optional):
+
+```bash
+celery -A backend.celery_app:celery_app beat --loglevel=info
+```
+
+Combined dev command (API + worker in one terminal):
+
+```bash
+uvicorn backend.main:app --reload --port 8000 & celery -A backend.celery_app:celery_app worker --loglevel=info
+```
 
 ---
 

@@ -2,9 +2,11 @@
 
 from __future__ import annotations
 
+import os
 from typing import Any, Dict, List, Optional
 
 import requests
+from .cache import get_json, make_key, set_json
 
 
 def fetch_forecast_daily(
@@ -18,6 +20,13 @@ def fetch_forecast_daily(
     Return Open-Meteo daily forecast JSON (time, weathercode, temperature_2m_max, etc.).
     """
     d = max(1, min(int(days), 16))
+    ttl_sec = int(os.getenv("CACHE_TTL_OPEN_METEO_SEC", "3600"))
+    lat_r = round(float(lat), 3)
+    lon_r = round(float(lon), 3)
+    cache_key = make_key("open_meteo_daily_v1", [str(lat_r), str(lon_r), str(d)])
+    cached = get_json(cache_key)
+    if isinstance(cached, dict):
+        return cached
     resp = requests.get(
         "https://api.open-meteo.com/v1/forecast",
         params={
@@ -30,7 +39,9 @@ def fetch_forecast_daily(
         timeout=timeout,
     )
     resp.raise_for_status()
-    return resp.json()
+    out = resp.json()
+    set_json(cache_key, out, ttl_sec)
+    return out
 
 
 def summarize_forecast_for_prompt(forecast: Dict[str, Any], max_days: int = 5) -> List[Dict[str, Any]]:

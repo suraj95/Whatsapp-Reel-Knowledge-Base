@@ -112,7 +112,7 @@ def _post_process_response(response: AgenticQueryResponse, query: str, client: O
     return response
 
 
-def handle_query_agentic(
+async def handle_query_agentic(
     query: str,
     top_k: int,
     client: OpenAI,
@@ -134,7 +134,7 @@ def handle_query_agentic(
         trip_query = f"{context}\n{query}".strip()[-TRIP_QUERY_MAX_CHARS:]
 
     if intent_result.intent == QueryIntent.trip_planning:
-        response = handle_trip_planning(
+        response = await handle_trip_planning(
             index=index,
             query_embedding=query_embedding,
             top_k=top_k,

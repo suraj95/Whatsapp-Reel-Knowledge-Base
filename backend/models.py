@@ -30,6 +30,27 @@ class AddReelResponse(BaseModel):
     enrichment: Optional[EnrichmentData] = None
 
 
+class IngestionStatus(str, Enum):
+    queued = "queued"
+    running = "running"
+    completed = "completed"
+    failed = "failed"
+
+
+class CreateIngestionResponse(BaseModel):
+    job_id: str
+    status: IngestionStatus = IngestionStatus.queued
+
+
+class IngestionStatusResponse(BaseModel):
+    job_id: str
+    status: IngestionStatus
+    stage: Optional[str] = None
+    reel_id: Optional[str] = None
+    error: Optional[str] = None
+    result: Optional[AddReelResponse] = None
+
+
 class QueryRequest(BaseModel):
     query: str
     top_k: int = 5
