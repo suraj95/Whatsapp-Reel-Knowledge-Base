@@ -2,14 +2,21 @@
 
 from __future__ import annotations
 
+import os
 from typing import Any, Dict, List
 
 import requests
+from .cache import get_json, key_hash, make_key, set_json
 
 OVERPASS_URL = "https://overpass-api.de/api/interpreter"
+_TTL_SEC = int(os.getenv("CACHE_TTL_OVERPASS_SEC", "21600"))
 
 
 def overpass_query(query: str, *, timeout: float = 45.0) -> Dict[str, Any]:
+    cache_key = make_key("overpass_query_v1", [key_hash(query)])
+    cached = get_json(cache_key)
+    if isinstance(cached, dict):
+        return cached
     resp = requests.post(
         OVERPASS_URL,
         data={"data": query},
@@ -17,7 +24,9 @@ def overpass_query(query: str, *, timeout: float = 45.0) -> Dict[str, Any]:
         headers={"Content-Type": "application/x-www-form-urlencoded; charset=UTF-8"},
     )
     resp.raise_for_status()
-    return resp.json()
+    out = resp.json()
+    set_json(cache_key, out, _TTL_SEC)
+    return out
 
 
 def tourism_food_parks_around(

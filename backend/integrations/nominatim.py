@@ -10,6 +10,7 @@ import time
 from typing import Any, Dict, List, Optional, Tuple
 
 import requests
+from .cache import get_json, make_key, set_json
 
 DEFAULT_USER_AGENT = os.getenv(
     "NOMINATIM_USER_AGENT",
@@ -18,6 +19,7 @@ DEFAULT_USER_AGENT = os.getenv(
 
 _last_request_monotonic: float = 0.0
 _MIN_INTERVAL_SEC = 1.05
+_TTL_SEC = int(os.getenv("CACHE_TTL_NOMINATIM_SEC", "604800"))
 
 
 def _throttle() -> None:
@@ -39,6 +41,10 @@ def nominatim_search(
     q = (query or "").strip()
     if not q:
         return []
+    cache_key = make_key("nominatim_search_v1", [q, str(max(1, min(limit, 10)))])
+    cached = get_json(cache_key)
+    if isinstance(cached, list):
+        return cached
 
     _throttle()
     headers = {"User-Agent": user_agent or DEFAULT_USER_AGENT}
@@ -55,7 +61,9 @@ def nominatim_search(
     )
     resp.raise_for_status()
     data = resp.json()
-    return data if isinstance(data, list) else []
+    out = data if isinstance(data, list) else []
+    set_json(cache_key, out, _TTL_SEC)
+    return out
 
 
 def nominatim_to_lat_lon_bbox(

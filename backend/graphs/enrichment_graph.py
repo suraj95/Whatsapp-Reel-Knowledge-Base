@@ -3,12 +3,15 @@
 from __future__ import annotations
 
 import os
+import requests
 from functools import lru_cache
 from typing import Any, Dict, Optional
 
 from langchain_core.messages import AIMessage, HumanMessage
 from langchain_core.tools import tool
 from langgraph.prebuilt import create_react_agent
+
+from backend.integrations.cache import get_json, key_hash, make_key, set_json
 
 
 ENRICHMENT_SYSTEM = """You are an enrichment agent for a travel/food reel database.
@@ -45,7 +48,6 @@ Rules:
 @lru_cache(maxsize=1)
 def _build_enrichment_agent():
     from langchain_openai import ChatOpenAI
-    from langchain_community.tools.tavily_search import TavilySearchResults
 
     from backend.integrations.nominatim import nominatim_search
 
@@ -85,8 +87,37 @@ def _build_enrichment_agent():
             "country": address.get("country"),
         }
 
-    tavily = TavilySearchResults(max_results=2, name="tavily_search")
-    tools = [tavily, geocode_place]
+    @tool
+    def tavily_search(query: str) -> dict:
+        """Search web context for place hints using cached Tavily HTTP calls."""
+        q = (query or "").strip()
+        if not q:
+            return {"results": []}
+        cache_key = make_key("tavily_search_v1", [key_hash(q), "2"])
+        cached = get_json(cache_key)
+        if isinstance(cached, dict):
+            return cached
+
+        api_key = os.getenv("TAVILY_API_KEY")
+        if not api_key:
+            return {"error": "TAVILY_API_KEY is not set", "results": []}
+        resp = requests.post(
+            "https://api.tavily.com/search",
+            json={
+                "api_key": api_key,
+                "query": q,
+                "search_depth": "basic",
+                "include_answer": True,
+                "max_results": 2,
+            },
+            timeout=12,
+        )
+        resp.raise_for_status()
+        payload = resp.json()
+        set_json(cache_key, payload, int(os.getenv("CACHE_TTL_TAVILY_SEC", "86400")))
+        return payload
+
+    tools = [tavily_search, geocode_place]
 
     api_key = os.getenv("OPENAI_API_KEY")
     if not api_key:

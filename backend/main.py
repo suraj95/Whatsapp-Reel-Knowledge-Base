@@ -3,33 +3,31 @@ import uuid
 import logging
 from typing import List
 
-from fastapi import FastAPI, HTTPException
+from fastapi import BackgroundTasks, FastAPI, HTTPException
 from dotenv import load_dotenv
 
 from openai import OpenAI
 from pinecone import Pinecone
 
-from .helpers import (
-    auto_tag_text,
-    embed_text,
-    extract_reel_metadata_with_yt_dlp,
-    enrich_reel_summary,
-    format_enrichment_for_metadata,
-    strip_igsh_parameter,
-    summarize_video_with_gpt4o,
-)
+from .helpers import embed_text, enrich_reel_summary, strip_igsh_parameter
+from .job_store import get_job_status, set_job_status
 from .models import (
     AgenticQueryResponse,
     AddReelRequest,
     AddReelResponse,
+    CreateIngestionResponse,
     EnrichRequest,
     EnrichResponse,
     EnrichmentData,
+    IngestionStatus,
+    IngestionStatusResponse,
     QueryRequest,
     QueryResponse,
     ReelResult,
 )
 from .query_orchestrator import handle_query_agentic
+from .services.ingestion_worker import process_reel_ingestion
+from .tasks import process_reel_ingestion_task
 
 load_dotenv()
 logging.basicConfig(level=logging.INFO)
@@ -62,76 +60,52 @@ index = pc.Index(INDEX_NAME)
 app = FastAPI(title="Travel Reels Knowledge Base")
 
 
-@app.post("/reels", response_model=AddReelResponse)
-async def add_reel(payload: AddReelRequest):
+@app.post("/reels", response_model=CreateIngestionResponse, status_code=202)
+async def add_reel(payload: AddReelRequest, background_tasks: BackgroundTasks):
     reel_url = strip_igsh_parameter(payload.url)
-    # 1. Summarize the reel with GPT-4o (vision-capable) using downloaded frames
+    if not reel_url:
+        raise HTTPException(status_code=400, detail="A valid reel URL is required.")
+
+    job_id = str(uuid.uuid4())
+    set_job_status(
+        job_id,
+        {
+            "job_id": job_id,
+            "status": IngestionStatus.queued.value,
+            "stage": "queued",
+            "reel_url": reel_url,
+        },
+    )
     try:
-        summary = summarize_video_with_gpt4o(client, reel_url)
-    except Exception as e:
-        # Most likely: private / blocked / unsupported URL or yt-dlp/ffmpeg error
-        message = str(e)
-        if not message:
-            message = repr(e)
-        # Truncate overly long errors
-        if len(message) > 500:
-            message = message[:500] + "..."
-        raise HTTPException(
-            status_code=400,
-            detail=f"Could not process this video link. Reason: {message}",
-        )
+        process_reel_ingestion_task.delay(job_id, reel_url, payload.manual_tags)
+        logger.info("ingestion_enqueued backend=celery job_id=%s", job_id)
+    except Exception as ex:
+        logger.warning("celery_enqueue_failed fallback=background_tasks reason=%s", ex)
+        background_tasks.add_task(process_reel_ingestion, job_id, reel_url, payload.manual_tags)
 
-    # 3. Auto tag
-    auto_tags = auto_tag_text(client, summary)
-    if payload.manual_tags:
-        auto_tags = list(
-            dict.fromkeys(auto_tags + [t.lower() for t in payload.manual_tags])
-        )
+    return CreateIngestionResponse(job_id=job_id, status=IngestionStatus.queued)
 
-    # 3b. Enrich summary using an agentic flow
-    # Also extract text metadata from the reel URL (description/hashtags/location tag)
-    # to improve location detection when the vision summary alone is incomplete.
-    reel_metadata = extract_reel_metadata_with_yt_dlp(reel_url)
-    enrichment = await enrich_reel_summary(
-        summary,
-        reel_url=reel_url,
-        reel_metadata=reel_metadata,
-    )
-    enrichment_metadata, enrichment_json = format_enrichment_for_metadata(enrichment)
 
-    # 4. Build embedding using summary + tags
-    doc_text = (
-        f"URL: {reel_url}\n"
-        f"SUMMARY: {summary}\n"
-        f"TAGS: {', '.join(auto_tags)}\n"
-    )
-    embedding = embed_text(client, doc_text)
+@app.get("/reels/{job_id}/status", response_model=IngestionStatusResponse)
+async def get_reel_ingestion_status(job_id: str):
+    data = get_job_status(job_id)
+    if not data:
+        raise HTTPException(status_code=404, detail=f"Unknown job_id: {job_id}")
 
-    reel_id = str(uuid.uuid4())
-
-    # 5. Store in Pinecone
-    index.upsert(
-        vectors=[
-            {
-                "id": reel_id,
-                "values": embedding,
-                "metadata": {
-                    "url": reel_url,
-                    "summary": summary,
-                    "tags": auto_tags,
-                    "doc_text": doc_text,
-                    **enrichment_metadata,
-                    "enrichment_json": enrichment_json,
-                },
-            }
-        ]
-    )
-
-    return AddReelResponse(
-        reel_id=reel_id,
-        summary=summary,
-        auto_tags=auto_tags,
-        enrichment=EnrichmentData(**enrichment),
+    result_payload = data.get("result")
+    parsed_result = None
+    if isinstance(result_payload, dict):
+        try:
+            parsed_result = AddReelResponse(**result_payload)
+        except Exception:
+            parsed_result = None
+    return IngestionStatusResponse(
+        job_id=job_id,
+        status=IngestionStatus(data["status"]),
+        stage=data.get("stage"),
+        reel_id=data.get("reel_id"),
+        error=data.get("error"),
+        result=parsed_result,
     )
 
 
@@ -188,8 +162,8 @@ def query_reels(payload: QueryRequest):
 
 
 @app.post("/query-agentic", response_model=AgenticQueryResponse)
-def query_reels_agentic(payload: QueryRequest):
-    response = handle_query_agentic(
+async def query_reels_agentic(payload: QueryRequest):
+    response = await handle_query_agentic(
         query=payload.query,
         top_k=payload.top_k,
         client=client,

@@ -30,12 +30,12 @@ def _response(
     )
 
 
-class QueryOrchestratorTests(unittest.TestCase):
+class QueryOrchestratorTests(unittest.IsolatedAsyncioTestCase):
     @patch("backend.query_orchestrator.detect_intent")
     @patch("backend.query_orchestrator.embed_text")
     @patch("backend.query_orchestrator.handle_search")
     @patch("backend.query_orchestrator.format_conversational_query_response")
-    def test_search_route_dispatch(self, mock_formatter, mock_search, mock_embed, mock_detect):
+    async def test_search_route_dispatch(self, mock_formatter, mock_search, mock_embed, mock_detect):
         mock_detect.return_value = type(
             "IntentResult", (), {"intent": QueryIntent.search, "confidence": 0.9}
         )()
@@ -55,7 +55,7 @@ class QueryOrchestratorTests(unittest.TestCase):
             sources=[source],
         )
 
-        res = handle_query_agentic("query", 5, client=object(), index=object())
+        res = await handle_query_agentic("query", 5, client=object(), index=object())
         self.assertEqual(res.meta.debug_route, "search_handler")
         self.assertEqual(res.intent, QueryIntent.search)
         self.assertEqual(res.narrative, "Conversational reply")
@@ -64,7 +64,7 @@ class QueryOrchestratorTests(unittest.TestCase):
     @patch("backend.query_orchestrator.embed_text")
     @patch("backend.query_orchestrator.handle_recommendation")
     @patch("backend.query_orchestrator.format_conversational_query_response")
-    def test_recommendation_route_dispatch(self, mock_formatter, mock_handler, mock_embed, mock_detect):
+    async def test_recommendation_route_dispatch(self, mock_formatter, mock_handler, mock_embed, mock_detect):
         mock_detect.return_value = type(
             "IntentResult", (), {"intent": QueryIntent.recommendation, "confidence": 0.9}
         )()
@@ -84,7 +84,7 @@ class QueryOrchestratorTests(unittest.TestCase):
             sources=[source],
         )
 
-        res = handle_query_agentic("query", 5, client=object(), index=object())
+        res = await handle_query_agentic("query", 5, client=object(), index=object())
         self.assertEqual(res.meta.debug_route, "recommendation_handler")
         self.assertEqual(res.intent, QueryIntent.recommendation)
         self.assertEqual(res.narrative, "Conversational reply")
@@ -93,7 +93,7 @@ class QueryOrchestratorTests(unittest.TestCase):
     @patch("backend.query_orchestrator.embed_text")
     @patch("backend.query_orchestrator.handle_trip_planning")
     @patch("backend.query_orchestrator.format_conversational_query_response")
-    def test_trip_planning_route_dispatch(self, mock_formatter, mock_handler, mock_embed, mock_detect):
+    async def test_trip_planning_route_dispatch(self, mock_formatter, mock_handler, mock_embed, mock_detect):
         mock_detect.return_value = type(
             "IntentResult", (), {"intent": QueryIntent.trip_planning, "confidence": 0.9}
         )()
@@ -112,8 +112,7 @@ class QueryOrchestratorTests(unittest.TestCase):
             "trip_planner_handler",
             sources=[source],
         )
-
-        res = handle_query_agentic("query", 5, client=object(), index=object())
+        res = await handle_query_agentic("query", 5, client=object(), index=object())
         self.assertEqual(res.meta.debug_route, "trip_planner_handler")
         self.assertEqual(res.intent, QueryIntent.trip_planning)
         self.assertEqual(res.narrative, "Conversational reply")
@@ -122,7 +121,7 @@ class QueryOrchestratorTests(unittest.TestCase):
     @patch("backend.query_orchestrator.embed_text")
     @patch("backend.query_orchestrator.handle_search")
     @patch("backend.query_orchestrator.format_conversational_query_response")
-    def test_low_confidence_filter_prunes_output(
+    async def test_low_confidence_filter_prunes_output(
         self, mock_formatter, mock_search, mock_embed, mock_detect
     ):
         mock_detect.return_value = type(
@@ -184,7 +183,7 @@ class QueryOrchestratorTests(unittest.TestCase):
             map_points=map_points,
         )
 
-        res = handle_query_agentic("query", 5, client=object(), index=object())
+        res = await handle_query_agentic("query", 5, client=object(), index=object())
         self.assertEqual([s.reel_id for s in res.sources], ["high-1"])
         self.assertEqual([p.reel_id for p in res.map_points], ["high-1"])
         self.assertEqual(len(res.cards), 2)
@@ -198,7 +197,7 @@ class QueryOrchestratorTests(unittest.TestCase):
     @patch("backend.query_orchestrator.embed_text")
     @patch("backend.query_orchestrator.handle_trip_planning")
     @patch("backend.query_orchestrator.format_conversational_query_response")
-    def test_trip_skip_narrative(self, mock_formatter, mock_handler, mock_embed, mock_detect):
+    async def test_trip_skip_narrative(self, mock_formatter, mock_handler, mock_embed, mock_detect):
         mock_detect.return_value = type(
             "IntentResult", (), {"intent": QueryIntent.trip_planning, "confidence": 0.9}
         )()
@@ -213,7 +212,7 @@ class QueryOrchestratorTests(unittest.TestCase):
         res.narrative = "Planner narrative"
         mock_handler.return_value = res
 
-        out = handle_query_agentic("query", 5, client=object(), index=object())
+        out = await handle_query_agentic("query", 5, client=object(), index=object())
         self.assertEqual(out.narrative, "Planner narrative")
         mock_formatter.assert_not_called()
 

@@ -626,10 +626,29 @@ with tabs[0]:
                     resp = requests.post(
                         f"{API_BASE}/reels",
                         json={"url": url},
-                        timeout=120,
+                        timeout=20,
                     )
                     resp.raise_for_status()
-                    data = resp.json()
+                    create_data = resp.json()
+                    job_id = create_data["job_id"]
+
+                    data = None
+                    start = time.time()
+                    while time.time() - start < 180:
+                        status_resp = requests.get(
+                            f"{API_BASE}/reels/{job_id}/status",
+                            timeout=15,
+                        )
+                        status_resp.raise_for_status()
+                        status_data = status_resp.json()
+                        if status_data.get("status") == "completed":
+                            data = status_data.get("result")
+                            break
+                        if status_data.get("status") == "failed":
+                            raise RuntimeError(status_data.get("error") or "Reel ingestion failed.")
+                        time.sleep(2)
+                    if not data:
+                        raise RuntimeError("Reel ingestion is still running. Please retry shortly.")
                 st.success("Reel saved successfully!")
                 if data.get("enrichment"):
                     render_enrichment(data["enrichment"])

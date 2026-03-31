@@ -1,4 +1,3 @@
-import asyncio
 import logging
 from typing import Any, List
 
@@ -10,7 +9,7 @@ from ..models import AgenticQueryResponse, IntentDetectionResult, QueryMeta
 logger = logging.getLogger(__name__)
 
 
-def handle_trip_planning(
+async def handle_trip_planning(
     index: Any,
     query_embedding: List[float],
     top_k: int,
@@ -19,15 +18,13 @@ def handle_trip_planning(
     client: OpenAI,
 ) -> AgenticQueryResponse:
     try:
-        return asyncio.run(
-            run_trip_planner_graph(
-                query=query,
-                index=index,
-                query_embedding=query_embedding,
-                top_k=top_k,
-                intent_result=intent_result,
-                client=client,
-            )
+        return await run_trip_planner_graph(
+            query=query,
+            index=index,
+            query_embedding=query_embedding,
+            top_k=top_k,
+            intent_result=intent_result,
+            client=client,
         )
     except Exception as ex:
         logger.exception("trip_planner_graph failed: %s", ex)
