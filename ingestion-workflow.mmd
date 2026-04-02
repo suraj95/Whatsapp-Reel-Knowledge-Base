@@ -1,0 +1,38 @@
+flowchart LR
+    input["Input: job_id, reel_url, manual_tags(optional)"] --> clients["Build Clients: validate OPENAI_API_KEY and PINECONE_API_KEY"]
+
+    clients --> summarize["Summarizing: summarize_video_with_gpt4o(reel_url) -> summary"]
+    summarize --> tag["Tagging: auto_tag_text(summary) + merge manual tags -> auto_tags"]
+    tag --> meta["Extract Metadata: extract_reel_metadata_with_yt_dlp(reel_url) -> reel_metadata"]
+    meta --> enrich["Enriching: enrich_reel_summary(...) + format_enrichment_for_metadata(...)"]
+    enrich --> embed["Embedding: build doc_text + embed_text(doc_text) + reel_id(uuid)"]
+    embed --> upsert["Upserting: pinecone index.upsert(id, embedding, metadata)"]
+    upsert --> complete["Complete: AddReelResponse + set_job_status(completed, reel_id, result)"]
+    complete --> output["Result Payload: reel_id, summary, auto_tags, enrichment"]
+
+    st1["status: summarizing"] -.-> summarize
+    st2["status: tagging"] -.-> tag
+    st3["status: extracting_metadata"] -.-> meta
+    st4["status: enriching"] -.-> enrich
+    st5["status: embedding"] -.-> embed
+    st6["status: upserting"] -.-> upsert
+
+    err["Exception Handler: trim error to 500 chars; set failed status; logger.exception; re-raise"]
+    clients -. failure .-> err
+    summarize -. failure .-> err
+    tag -. failure .-> err
+    meta -. failure .-> err
+    enrich -. failure .-> err
+    embed -. failure .-> err
+    upsert -. failure .-> err
+    complete -. failure .-> err
+
+    classDef llm fill:#e8f1ff,stroke:#4e7bd9,color:#1f3f7a
+    classDef vector fill:#e9f9ee,stroke:#2e9b4f,color:#145c2a
+    classDef status fill:#fff4db,stroke:#d19a1e,color:#704d00
+    classDef error fill:#ffe9e9,stroke:#cf3b3b,color:#7a1f1f
+
+    class summarize,tag,enrich,embed llm
+    class upsert vector
+    class st1,st2,st3,st4,st5,st6 status
+    class err error

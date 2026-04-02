@@ -103,6 +103,8 @@ class IntentDetectionResult(BaseModel):
     entities: IntentEntities = Field(default_factory=IntentEntities)
     clarification_needed: bool = False
     reason: Optional[str] = None
+    # How intent was chosen (for observability; not returned to clients on all routes).
+    detected_via: Optional[str] = None
 
 
 class MapPoint(BaseModel):
@@ -140,6 +142,8 @@ class QueryMeta(BaseModel):
     result_count: int = 0
     map_points_count: int = 0
     skip_conversational_rewrite: bool = False
+    request_id: Optional[str] = None
+    timings_ms: Optional[Dict[str, float]] = None
 
 
 class AgenticQueryResponse(BaseModel):

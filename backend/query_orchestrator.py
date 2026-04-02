@@ -1,4 +1,4 @@
-import logging
+import time
 from typing import Any, Dict, List, Optional
 
 from openai import OpenAI
@@ -9,8 +9,13 @@ from .handlers.trip_planner_handler import handle_trip_planning
 from .helpers import embed_text, format_conversational_query_response
 from .intent import detect_intent
 from .models import AgenticQueryResponse, QueryIntent
-
-logger = logging.getLogger(__name__)
+from .observability import (
+    get_log,
+    log_intent_resolved,
+    record_timing,
+    time_block,
+    truncate_for_log,
+)
 
 MIN_RESULT_SCORE = 0.35
 # Cap trip planner + intent context string length (conversation + latest query).
@@ -95,6 +100,14 @@ def _post_process_response(response: AgenticQueryResponse, query: str, client: O
         return response
 
     place_payload = _build_place_payload(response)
+    log = get_log()
+    t0 = time.perf_counter()
+    log.info(
+        "agent_step_start",
+        step="conversational_rewrite",
+        agent="conversational_rewrite",
+        route=response.meta.debug_route,
+    )
     try:
         narrative = format_conversational_query_response(
             client=client,
@@ -103,10 +116,32 @@ def _post_process_response(response: AgenticQueryResponse, query: str, client: O
         )
         if narrative:
             response.narrative = narrative
-    except Exception:
+    except Exception as ex:
+        elapsed_ms = (time.perf_counter() - t0) * 1000
+        record_timing("conversational_rewrite", elapsed_ms)
+        log.warning(
+            "conversational_rewrite_failed",
+            step="conversational_rewrite",
+            agent="conversational_rewrite",
+            duration_ms=round(elapsed_ms, 2),
+            error_type=type(ex).__name__,
+            error_message=str(ex)[:500],
+            route=response.meta.debug_route,
+        )
         response.narrative = (
             f"I found {len(response.sources)} relevant places from your saved reels. "
             "Would you like help with how to get there or nearby places to stay?"
+        )
+    else:
+        elapsed_ms = (time.perf_counter() - t0) * 1000
+        record_timing("conversational_rewrite", elapsed_ms)
+        log.info(
+            "agent_step_complete",
+            step="conversational_rewrite",
+            agent="conversational_rewrite",
+            duration_ms=round(elapsed_ms, 2),
+            narrative_chars=len(response.narrative or ""),
+            route=response.meta.debug_route,
         )
 
     return response
@@ -119,52 +154,69 @@ async def handle_query_agentic(
     index: Any,
     conversation_history: Optional[List[Dict[str, Any]]] = None,
 ) -> AgenticQueryResponse:
+    q_preview = truncate_for_log(query)
     context = _format_conversation_context(conversation_history)
-    intent_result = detect_intent(
-        query=query,
-        client=client,
-        conversation_context=context or None,
+
+    with time_block("detect_intent", "intent", query_preview=q_preview):
+        intent_result = detect_intent(
+            query=query,
+            client=client,
+            conversation_context=context or None,
+        )
+
+    log_intent_resolved(
+        path=intent_result.detected_via or "unknown",
+        intent=intent_result.intent.value,
+        confidence=intent_result.confidence,
+        reason=intent_result.reason,
+        query_preview=q_preview,
+        query_chars=len(query or ""),
     )
-    # Embed the current user message only so Pinecone matches stay stable and do not
-    # balloon when prior turns mention many places.
-    query_embedding = embed_text(client, query.strip())
+
+    with time_block("embed_query", "embedding", intent=intent_result.intent.value):
+        query_embedding = embed_text(client, query.strip())
 
     trip_query = query.strip()
     if context:
         trip_query = f"{context}\n{query}".strip()[-TRIP_QUERY_MAX_CHARS:]
 
     if intent_result.intent == QueryIntent.trip_planning:
-        response = await handle_trip_planning(
-            index=index,
-            query_embedding=query_embedding,
-            top_k=top_k,
-            intent_result=intent_result,
-            query=trip_query,
-            client=client,
-        )
+        with time_block("handler_trip_planning", "trip_planner_handler", intent=intent_result.intent.value):
+            response = await handle_trip_planning(
+                index=index,
+                query_embedding=query_embedding,
+                top_k=top_k,
+                intent_result=intent_result,
+                query=trip_query,
+                client=client,
+            )
     elif intent_result.intent == QueryIntent.recommendation:
-        response = handle_recommendation(
-            index=index,
-            query_embedding=query_embedding,
-            top_k=top_k,
-            intent_result=intent_result,
-        )
+        with time_block("handler_recommendation", "recommendation_handler", intent=intent_result.intent.value):
+            response = handle_recommendation(
+                index=index,
+                query_embedding=query_embedding,
+                top_k=top_k,
+                intent_result=intent_result,
+            )
     else:
-        response = handle_search(
-            index=index,
-            query_embedding=query_embedding,
-            top_k=top_k,
-            intent_result=intent_result,
-        )
+        with time_block("handler_search", "search_handler", intent=intent_result.intent.value):
+            response = handle_search(
+                index=index,
+                query_embedding=query_embedding,
+                top_k=top_k,
+                intent_result=intent_result,
+            )
 
-    response = _post_process_response(response=response, query=query, client=client)
+    with time_block("post_process", "post_process", debug_route=response.meta.debug_route):
+        response = _post_process_response(response=response, query=query, client=client)
 
-    logger.info(
-        "agentic_query route=%s intent=%s confidence=%.2f results=%d map_points=%d",
-        response.meta.debug_route,
-        response.intent.value,
-        response.meta.confidence,
-        response.meta.result_count,
-        response.meta.map_points_count,
+    get_log().info(
+        "agentic_query_complete",
+        route=response.meta.debug_route,
+        intent=response.intent.value,
+        confidence=round(response.meta.confidence, 4),
+        results=response.meta.result_count,
+        map_points=response.meta.map_points_count,
+        narrative_chars=len(response.narrative or ""),
     )
     return response

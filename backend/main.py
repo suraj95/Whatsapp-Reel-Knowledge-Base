@@ -1,16 +1,15 @@
 import os
 import uuid
-import logging
 from typing import List
 
-from fastapi import BackgroundTasks, FastAPI, HTTPException
 from dotenv import load_dotenv
-
+from fastapi import BackgroundTasks, FastAPI, HTTPException
 from openai import OpenAI
 from pinecone import Pinecone
 
 from .helpers import embed_text, enrich_reel_summary, strip_igsh_parameter
 from .job_store import get_job_status, set_job_status
+from .middleware.request_context import RequestContextMiddleware
 from .models import (
     AgenticQueryResponse,
     AddReelRequest,
@@ -25,13 +24,19 @@ from .models import (
     QueryResponse,
     ReelResult,
 )
+from .observability import (
+    configure_observability,
+    expose_observability_in_response,
+    get_log,
+    get_request_id,
+    get_request_timings,
+)
 from .query_orchestrator import handle_query_agentic
 from .services.ingestion_worker import process_reel_ingestion
 from .tasks import process_reel_ingestion_task
 
 load_dotenv()
-logging.basicConfig(level=logging.INFO)
-logger = logging.getLogger(__name__)
+configure_observability()
 
 OPENAI_API_KEY = os.getenv("OPENAI_API_KEY")
 if not OPENAI_API_KEY:
@@ -58,6 +63,7 @@ index = pc.Index(INDEX_NAME)
 
 # ---- FastAPI app ----
 app = FastAPI(title="Travel Reels Knowledge Base")
+app.add_middleware(RequestContextMiddleware)
 
 
 @app.post("/reels", response_model=CreateIngestionResponse, status_code=202)
@@ -67,6 +73,7 @@ async def add_reel(payload: AddReelRequest, background_tasks: BackgroundTasks):
         raise HTTPException(status_code=400, detail="A valid reel URL is required.")
 
     job_id = str(uuid.uuid4())
+    correlation_id = get_request_id()
     set_job_status(
         job_id,
         {
@@ -77,11 +84,30 @@ async def add_reel(payload: AddReelRequest, background_tasks: BackgroundTasks):
         },
     )
     try:
-        process_reel_ingestion_task.delay(job_id, reel_url, payload.manual_tags)
-        logger.info("ingestion_enqueued backend=celery job_id=%s", job_id)
+        process_reel_ingestion_task.delay(
+            job_id, reel_url, payload.manual_tags, correlation_id=correlation_id
+        )
+        get_log().info(
+            "ingestion_enqueued",
+            backend="celery",
+            job_id=job_id,
+            correlation_id=correlation_id,
+        )
     except Exception as ex:
-        logger.warning("celery_enqueue_failed fallback=background_tasks reason=%s", ex)
-        background_tasks.add_task(process_reel_ingestion, job_id, reel_url, payload.manual_tags)
+        get_log().warning(
+            "celery_enqueue_failed",
+            fallback="background_tasks",
+            reason=str(ex)[:500],
+            job_id=job_id,
+            correlation_id=correlation_id,
+        )
+        background_tasks.add_task(
+            process_reel_ingestion,
+            job_id,
+            reel_url,
+            payload.manual_tags,
+            correlation_id,
+        )
 
     return CreateIngestionResponse(job_id=job_id, status=IngestionStatus.queued)
 
@@ -170,14 +196,26 @@ async def query_reels_agentic(payload: QueryRequest):
         index=index,
         conversation_history=payload.conversation_history,
     )
-    logger.info(
-        "query_agentic intent=%s route=%s confidence=%.2f results=%d map_points=%d",
-        response.intent.value,
-        response.meta.debug_route,
-        response.meta.confidence,
-        response.meta.result_count,
-        response.meta.map_points_count,
+    get_log().info(
+        "query_agentic_summary",
+        intent=response.intent.value,
+        route=response.meta.debug_route,
+        confidence=round(response.meta.confidence, 4),
+        results=response.meta.result_count,
+        map_points=response.meta.map_points_count,
     )
+    if expose_observability_in_response():
+        timings = get_request_timings()
+        response = response.model_copy(
+            update={
+                "meta": response.meta.model_copy(
+                    update={
+                        "request_id": get_request_id(),
+                        "timings_ms": timings if timings else None,
+                    }
+                )
+            }
+        )
     return response
 
 
@@ -185,4 +223,3 @@ async def query_reels_agentic(payload: QueryRequest):
 async def enrich_summary(payload: EnrichRequest):
     enrichment = await enrich_reel_summary(payload.vision_summary)
     return EnrichResponse(enrichment=EnrichmentData(**enrichment))
-
