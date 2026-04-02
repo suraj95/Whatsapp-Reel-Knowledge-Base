@@ -1,12 +1,10 @@
-import logging
 from typing import Any, List
 
 from openai import OpenAI
 
 from ..graphs.trip_planner_graph import run_trip_planner_graph
 from ..models import AgenticQueryResponse, IntentDetectionResult, QueryMeta
-
-logger = logging.getLogger(__name__)
+from ..observability import get_log
 
 
 async def handle_trip_planning(
@@ -27,7 +25,12 @@ async def handle_trip_planning(
             client=client,
         )
     except Exception as ex:
-        logger.exception("trip_planner_graph failed: %s", ex)
+        get_log().exception(
+            "trip_planner_graph_failed",
+            agent="trip_planner_handler",
+            error_type=type(ex).__name__,
+            error_message=str(ex)[:500],
+        )
         return AgenticQueryResponse(
             intent=intent_result.intent,
             map_points=[],

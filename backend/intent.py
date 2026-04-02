@@ -236,12 +236,12 @@ def detect_intent(
 
     # Rules are enough for strongly-signaled queries.
     if rule_result.confidence >= 0.86:
-        return rule_result
+        return rule_result.model_copy(update={"detected_via": "rule"})
 
     try:
         llm_result = _llm_intent(query, client, conversation_context=conversation_context)
     except Exception:
-        return rule_result
+        return rule_result.model_copy(update={"detected_via": "rule"})
 
     # Default search (0.75) often loses to a correct but modest-confidence LLM trip
     # because 0.62 < 0.75. Prefer trip_planning when the model is reasonably sure.
@@ -250,9 +250,9 @@ def detect_intent(
         and llm_result.confidence >= 0.52
         and rule_result.intent == QueryIntent.search
     ):
-        return llm_result
+        return llm_result.model_copy(update={"detected_via": "llm"})
 
     if llm_result.confidence >= rule_result.confidence:
-        return llm_result
+        return llm_result.model_copy(update={"detected_via": "llm"})
 
-    return rule_result
+    return rule_result.model_copy(update={"detected_via": "rule"})

@@ -6,6 +6,7 @@ import json
 from pathlib import Path
 import re
 import time
+import uuid
 import pydeck as pdk
 from constants import CHAT_TOP_K
 
@@ -702,6 +703,7 @@ with tabs[1]:
 
         with st.chat_message("assistant"):
             placeholder = st.empty()
+            request_id = str(uuid.uuid4())
             try:
                 with st.spinner("Thinking..."):
                     resp = requests.post(
@@ -711,6 +713,7 @@ with tabs[1]:
                             "top_k": CHAT_TOP_K,
                             "conversation_history": conversation_history,
                         },
+                        headers={"X-Request-ID": request_id},
                         timeout=60,
                     )
                     resp.raise_for_status()
@@ -767,7 +770,13 @@ with tabs[1]:
                 if results:
                     render_results_boxes(results)
             except Exception as e:
-                error_text = f"I hit an error while searching your reels: {e}"
+                rid = request_id
+                if isinstance(e, requests.HTTPError) and e.response is not None:
+                    rid = e.response.headers.get("X-Request-ID") or request_id
+                error_text = (
+                    f"I hit an error while searching your reels: {e}\n\n"
+                    f"Request ID: `{rid}` — include this when reporting issues or grepping logs."
+                )
                 placeholder.markdown(error_text)
                 st.session_state.chat_messages.append(
                     {"role": "assistant", "content": error_text, "results": None, "agentic": None}

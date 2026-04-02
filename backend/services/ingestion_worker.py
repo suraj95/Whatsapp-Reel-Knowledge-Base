@@ -1,6 +1,6 @@
 import asyncio
-import logging
 import os
+import time
 import uuid
 from typing import Any, Dict, List, Optional
 
@@ -17,8 +17,8 @@ from ..helpers import (
 )
 from ..job_store import set_job_status
 from ..models import AddReelResponse, EnrichmentData, IngestionStatus
+from ..observability import get_log, log_ingestion_stage
 
-logger = logging.getLogger(__name__)
 INDEX_NAME = "whatsapp-reels"
 
 
@@ -44,34 +44,77 @@ async def process_reel_ingestion_async(
     job_id: str,
     reel_url: str,
     manual_tags: Optional[List[str]] = None,
+    correlation_id: Optional[str] = None,
 ) -> Dict[str, Any]:
     client, index = _build_clients()
     try:
         set_job_status(job_id, _status_payload(job_id, IngestionStatus.running, stage="summarizing"))
+        t0 = time.perf_counter()
         summary = summarize_video_with_gpt4o(client, reel_url)
+        log_ingestion_stage(
+            event="ingestion_stage",
+            job_id=job_id,
+            stage="summarizing",
+            duration_ms=(time.perf_counter() - t0) * 1000,
+            correlation_id=correlation_id,
+        )
 
         set_job_status(job_id, _status_payload(job_id, IngestionStatus.running, stage="tagging"))
+        t0 = time.perf_counter()
         auto_tags = auto_tag_text(client, summary)
         if manual_tags:
             auto_tags = list(dict.fromkeys(auto_tags + [t.lower() for t in manual_tags]))
+        log_ingestion_stage(
+            event="ingestion_stage",
+            job_id=job_id,
+            stage="tagging",
+            duration_ms=(time.perf_counter() - t0) * 1000,
+            correlation_id=correlation_id,
+            tag_count=len(auto_tags),
+        )
 
         set_job_status(job_id, _status_payload(job_id, IngestionStatus.running, stage="extracting_metadata"))
+        t0 = time.perf_counter()
         reel_metadata = extract_reel_metadata_with_yt_dlp(reel_url)
+        log_ingestion_stage(
+            event="ingestion_stage",
+            job_id=job_id,
+            stage="extracting_metadata",
+            duration_ms=(time.perf_counter() - t0) * 1000,
+            correlation_id=correlation_id,
+        )
 
         set_job_status(job_id, _status_payload(job_id, IngestionStatus.running, stage="enriching"))
+        t0 = time.perf_counter()
         enrichment = await enrich_reel_summary(
             summary,
             reel_url=reel_url,
             reel_metadata=reel_metadata,
         )
         enrichment_metadata, enrichment_json = format_enrichment_for_metadata(enrichment)
+        log_ingestion_stage(
+            event="ingestion_stage",
+            job_id=job_id,
+            stage="enriching",
+            duration_ms=(time.perf_counter() - t0) * 1000,
+            correlation_id=correlation_id,
+        )
 
         set_job_status(job_id, _status_payload(job_id, IngestionStatus.running, stage="embedding"))
+        t0 = time.perf_counter()
         doc_text = f"URL: {reel_url}\nSUMMARY: {summary}\nTAGS: {', '.join(auto_tags)}\n"
         embedding = embed_text(client, doc_text)
         reel_id = str(uuid.uuid4())
+        log_ingestion_stage(
+            event="ingestion_stage",
+            job_id=job_id,
+            stage="embedding",
+            duration_ms=(time.perf_counter() - t0) * 1000,
+            correlation_id=correlation_id,
+        )
 
         set_job_status(job_id, _status_payload(job_id, IngestionStatus.running, stage="upserting"))
+        t0 = time.perf_counter()
         index.upsert(
             vectors=[
                 {
@@ -88,6 +131,14 @@ async def process_reel_ingestion_async(
                 }
             ]
         )
+        log_ingestion_stage(
+            event="ingestion_stage",
+            job_id=job_id,
+            stage="upserting",
+            duration_ms=(time.perf_counter() - t0) * 1000,
+            correlation_id=correlation_id,
+        )
+
         result = AddReelResponse(
             reel_id=reel_id,
             summary=summary,
@@ -105,7 +156,12 @@ async def process_reel_ingestion_async(
                 result=result_payload,
             ),
         )
-        logger.info("ingestion_completed job_id=%s reel_id=%s", job_id, reel_id)
+        get_log().info(
+            "ingestion_completed",
+            job_id=job_id,
+            reel_id=reel_id,
+            correlation_id=correlation_id,
+        )
         return result_payload
     except Exception as ex:
         message = str(ex)[:500]
@@ -118,10 +174,27 @@ async def process_reel_ingestion_async(
                 error=message,
             ),
         )
-        logger.exception("ingestion_failed job_id=%s error=%s", job_id, ex)
+        get_log().exception(
+            "ingestion_failed",
+            job_id=job_id,
+            correlation_id=correlation_id,
+            error_type=type(ex).__name__,
+            error_message=message,
+        )
         raise
 
 
-def process_reel_ingestion(job_id: str, reel_url: str, manual_tags: Optional[List[str]] = None) -> Dict[str, Any]:
-    return asyncio.run(process_reel_ingestion_async(job_id=job_id, reel_url=reel_url, manual_tags=manual_tags))
-
+def process_reel_ingestion(
+    job_id: str,
+    reel_url: str,
+    manual_tags: Optional[List[str]] = None,
+    correlation_id: Optional[str] = None,
+) -> Dict[str, Any]:
+    return asyncio.run(
+        process_reel_ingestion_async(
+            job_id=job_id,
+            reel_url=reel_url,
+            manual_tags=manual_tags,
+            correlation_id=correlation_id,
+        )
+    )
